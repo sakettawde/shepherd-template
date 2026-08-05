@@ -8,6 +8,7 @@ This repo is the **framework**: skills, hooks, and an empty ledger/registry. You
 
 - **herdr 0.7.4** installed, with its server running — shepherd is herdr-native and refuses to dispatch outside it (`HERDR_ENV=1`).
 - **Claude Code** with access to capable models (worker tiers default to `fable --effort high` / `fable --effort max` — adjust in `CLAUDE.md` §6 if your plan differs).
+- The **superpowers** Claude Code plugin installed — worker briefs mandate its skills (brainstorming, test-driven-development, writing-plans, subagent-driven-development), and the retro skill proposes framework edits via writing-skills.
 - Linux/WSL with `python3` (hooks and JSON parsing use it; no jq needed).
 - A code directory containing the project repos you want shepherd to manage.
 

@@ -61,6 +61,8 @@ Task states: `captured → queued → briefed → working → blocked → review
 
 Registry cards: update fields and append to sections **in place — never drop a section**. `## Product`, `## Context notes`, `## Gotchas`, `## History` are permanent fixtures of every card, even when empty. Entries *within* Gotchas/Context notes are prunable when superseded (retro's job) — sections are permanent, contradictory stale entries are not.
 
+`<shepherd-root>` in skill recipes = the absolute path of this clone; resolve it from your session's working directory at dispatch time.
+
 ```bash
 grep -l "state: queued"  ledger/tasks/T-*.md                     # queue
 grep -lE "state: (briefed|working|blocked|review)" ledger/tasks/T-*.md   # active
