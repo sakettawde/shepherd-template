@@ -32,7 +32,7 @@ Routing or intent ambiguous → ask. Never guess the project. If two projects pl
 
    | | size | budget | tier |
    |---|---|---|---|
-   | one-file fix, config, small bug | S | 30m | standard (opus/xhigh) |
+   | one-file fix, config, small bug | S | 30m | standard (fable/high) |
    | feature, multi-file bug, refactor | M | 120m | standard |
    | large feature, migration, cross-cutting | L | 240m | standard or heavy |
    | novel architecture · security-sensitive · >1-day scope · retry after failure | any | — | **heavy** (fable/max) |
