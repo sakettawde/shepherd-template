@@ -39,7 +39,7 @@ Read `CLAUDE.md` — it is the operating manual the shepherd session itself runs
 1. init-shepherd completed: `CLAUDE.md` `## 0. Operator` holds your values; `grep -c '^| ' registry/projects.md` counts your projects + 1 header row.
 2. Hooks registered: `python3 -c "import json,pathlib;print(json.dumps(json.load(open(pathlib.Path.home()/'.claude/settings.json'))['hooks']['Stop'],indent=1))"` shows a command pointing into *this clone's* `hooks/`.
 3. Stub worker check: `SHEPHERD_TASK_ID=T-TEST SHEPHERD_STATUS_FILE=$PWD/ledger/status/T-TEST.jsonl sh hooks/worker-stop.sh </dev/null` then confirm `ledger/status/T-TEST.jsonl` contains a `"event": "stop"` line; delete the file afterwards.
-4. Grep cookbook: the four recipes in `CLAUDE.md` §5 run clean (empty results, no errors) against the empty ledger.
+4. Grep cookbook: the four recipes in `CLAUDE.md` §5 find nothing on a fresh clone — expect empty results, plus `No such file or directory` from the unexpanded globs until your first task card and project card exist.
 
 ## Updating
 
