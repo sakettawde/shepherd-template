@@ -1,13 +1,13 @@
 ---
 name: monitor
-description: Wake handler for worker events. Use whenever a background herdr wait exits (completion, blocked, or 15-min heartbeat timeout), or when manually checking a worker. Runs the four-source verification ladder, classifies done/blocked/overrun/stalled/lying, acts, and always re-arms or closes.
+description: Wake handler for worker events. Use whenever a background herdr wait exits (completion, blocked, or heartbeat timeout (30m S/M, 60m L/heavy)), or when manually checking a worker. Runs the four-source verification ladder, classifies done/blocked/overrun/stalled/lying, acts, and always re-arms or closes.
 ---
 
 # monitor
 
 ## Trigger
 
-A background watcher task exited — the status-file watcher (exit 0 = terminal claim written; 124 = 15-min heartbeat) or the herdr `blocked` stall watcher (exit 0 = worker stuck on a prompt; 1 = its own timeout) — or you were asked to check a worker. Map the watcher to its task card first.
+A background watcher task exited — the status-file watcher (exit 0 = terminal claim written; 124 = heartbeat backstop — 30m S/M, 60m L/heavy per adapter R5) or the herdr `blocked` stall watcher (exit 0 = worker stuck on a prompt; 1 = its own timeout) — or you were asked to check a worker. Map the watcher to its task card first.
 
 - **Wake for a task already closed or already being handled → no-op.** The sibling watcher always fires eventually; don't re-arm it, don't re-verify.
 - The operator may talk to a worker pane directly; those turns still append to the status file (the env vars live in the worker process). Reconcile from the file — unexpected extra activity is information, not an error.
@@ -25,7 +25,7 @@ A background watcher task exited — the status-file watcher (exit 0 = terminal 
 | Verdict | Evidence | Action |
 |---|---|---|
 | **done** | claim done ∧ commits on branch ∧ DoD passes when you run it ∧ no prompt UI in tail | `state: review` → retro-lite (CLAUDE.md §3): learnings → memory/gotchas, History+Log updated, toast `--sound done`, retire the pane (R9 — close, never `/exit`), registry `active-task: none`, dispatch next queued task, commit |
-| **blocked** | status blocked, claim blocked, or tail shows a question | Read the actual question (R6, more lines if needed; for plan approvals read the worker's `.superpowers/` artifact in the project repo, not its summary). Decide per CLAUDE.md §4: **answer** → single-line reply via R4, decision logged to `decisions/`, re-arm R5; **escalate** → toast `--sound request` + tell the operator the question and your best guess, `state: blocked`, arm a long wait (3600000) so a self-unblock still wakes you |
+| **blocked** | status blocked, claim blocked, or tail shows a question | Read the actual question (R6, more lines if needed; for plan approvals read the worker's `.superpowers/` artifact in the project repo, not its summary). Decide per CLAUDE.md §4: **answer** → single-line reply via R4, decision logged to `decisions/`, re-arm R5; **escalate** → toast `--sound request` + tell the operator the question and your best guess; several open decisions (this worker's or across workers) → one numbered round, each with a `➡️` recommendation, so one reply from the operator unblocks everything; `state: blocked`, arm a long wait (3600000) so a self-unblock still wakes you |
 | **overrun** | wall-clock past card `budget:`, still working | v0: note in Log + one line to the operator, re-arm (enforcement is deferred by design) |
 | **stalled** | heartbeat fired, status `working`, but no new status-file lines across two consecutive wakes | R6 inspect; if wedged, one nudge via R4 (`Status check - reply with your SHEPHERD status line`); still nothing next wake → escalate |
 | **lying** | claim done but git/DoD disagree, or DoD/test files were tampered with | `state: working`, reply via R4 naming the concrete gap (`Your done claim failed verification: <fact>. Fix and re-verify.`), Log it as a failed verification cycle, re-arm |

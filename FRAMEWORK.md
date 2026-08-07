@@ -12,6 +12,7 @@ Sync rule: **framework files are edited in shepherd-template first**, then pulle
 | `scripts/**` | framework | bootstrap-registry.sh |
 | `README.md`, `FRAMEWORK.md` | framework | |
 | `docs/herdr-schema-*.json` | framework | pin snapshots |
+| `docs/writing-for-agents.md` | framework | reference for skills/CLAUDE.md authoring (onboard, retro) |
 | `ledger/**` | instance state | task cards, status JSONLs, attachments |
 | `registry/**` | instance state | project index + cards |
 | `decisions/**` | instance state | decision log |

@@ -78,6 +78,7 @@ grep -l "onboarded: yes" registry/projects/*.md                  # workable proj
 - Repo-specific standing rules (git sync before work, branch naming, push after complete, test before done) live in **each project's own CLAUDE.md** — written at onboarding. It is the single authoritative source: the Brief references it, never restates it. Brief Constraints carry only task-specific facts and hard lines (branch name, no direct merge/push to dev/main, brainstorming mandate).
 - Close-out default: verified work lands on the project's dev branch (merge the task branch; keep a dev→main PR open where the project uses one). Docs-only changes merge immediately once verified. Never leave verified work unmerged — adjust per project in its CLAUDE.md if its flow differs.
 - Workers end every pause and final message with `SHEPHERD: done|blocked|failed — <one-liner>`.
+- Destructive git (force push, protected-branch push, `reset --hard`, …) is mechanically blocked in worker sessions by the user-global `hooks/worker-git-guardrail.sh` PreToolUse hook (gated on `SHEPHERD_TASK_ID`); a blocked worker reports `SHEPHERD: blocked` and the op flows through §4.
 - Completion is believed only when **all four** agree: status-file claim ∧ git branch commits ∧ DoD command passes when *you* run it ∧ no prompt UI in the pane tail.
 
 ## 7. herdr version pin

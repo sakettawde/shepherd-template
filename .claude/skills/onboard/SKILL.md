@@ -33,7 +33,7 @@ Produce a product-perspective understanding of <slug> and install shepherd's wor
    - Never merge or push `<dev-branch>` or main. Push only your task branch; after pushing, check out `<dev-branch>` again so the repo rests in a neutral state.
    - Run `<test-command>` before claiming done.
    - Repo-specific quirks you discovered (deploy cautions, generated files, env handling).
-   Preserve all existing CLAUDE.md content — append/merge, never overwrite.
+   Preserve all existing CLAUDE.md content — append/merge, never overwrite. Write rules per <shepherd-root>/docs/writing-for-agents.md: positive phrasing, no restating what config files already answer, every rule earning its always-loaded cost.
 3. Commit CLAUDE.md on branch `task/T-NNNN-onboard` and push it.
 
 ### Constraints

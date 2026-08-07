@@ -14,7 +14,7 @@ Fresh clone if `CLAUDE.md` contains the literal line `- name: (run init-shepherd
 1. **Environment gate** — run the herdr-adapter R1 gate (`HERDR_ENV`, `herdr --version` against the pin in CLAUDE.md §7, `herdr status`). Not inside herdr or version mismatch → report exactly what failed and what to install/fix, then stop. Nothing below runs on a failed gate.
 2. **Interview** — ask, one at a time: the operator's name; the absolute path of their code directory (where project repos live — offer `$(dirname <shepherd-root>)` as the default); whether notification sounds are wanted (default yes).
 3. **Write the Operator block** — replace the three value lines under `## 0. Operator` in CLAUDE.md with the answers (`- name: <name>`, `- code-dir: <path>`, `- notifications: <sounds on (done / request) | silent>`). Never touch any other section.
-4. **Register hooks user-globally** — merge into `~/.claude/settings.json` (create it as `{}` if absent) using the python3 snippet below: a `Stop` entry (matcher `*`) running `bash '<shepherd-root>/hooks/worker-stop.sh'` and a `Notification` entry (matcher `permission_prompt|idle_prompt|elicitation_dialog`) running `bash '<shepherd-root>/hooks/worker-notify.sh'`, both `timeout: 10`. The snippet first removes any existing hook whose command ends in `worker-stop.sh'` / `worker-notify.sh'` (that is the re-run/new-PC path), then appends the fresh entries. All unrelated settings and hooks are preserved verbatim.
+4. **Register hooks user-globally** — merge into `~/.claude/settings.json` (create it as `{}` if absent) using the python3 snippet below: a `Stop` entry (matcher `*`) running `bash '<shepherd-root>/hooks/worker-stop.sh'`, a `Notification` entry (matcher `permission_prompt|idle_prompt|elicitation_dialog`) running `bash '<shepherd-root>/hooks/worker-notify.sh'`, and a `PreToolUse` entry (matcher `Bash`) running `bash '<shepherd-root>/hooks/worker-git-guardrail.sh'` (blocks destructive git in worker sessions), all `timeout: 10`. The snippet first removes any existing hook whose command ends in the same script name (that is the re-run/new-PC path), then appends the fresh entries. All unrelated settings and hooks are preserved verbatim.
 
    ```bash
    SHEPHERD_ROOT="$(pwd)" python3 - <<'PY'
@@ -33,6 +33,7 @@ Fresh clone if `CLAUDE.md` contains the literal line `- name: (run init-shepherd
        entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
    install("Stop", "*", "worker-stop.sh")
    install("Notification", "permission_prompt|idle_prompt|elicitation_dialog", "worker-notify.sh")
+   install("PreToolUse", "Bash", "worker-git-guardrail.sh")
    p.parent.mkdir(parents=True, exist_ok=True)
    p.write_text(json.dumps(s, indent=2) + "\n")
    print("hooks registered ->", p)

@@ -9,11 +9,14 @@ created: <YYYY-MM-DDTHH:MM>
 ## Brief
 
 ### Objective
-<one paragraph: the outcome, stated user-visibly>
+<one paragraph: current behavior vs desired behavior, stated user-visibly. Behavioral, not procedural — the worker explores and plans its own route>
+
+### Why
+<the intent behind the ask — why the operator wants this now, and the working mode (quick-and-dirty vs built-for-the-long-term). Use it to judge trade-offs the brief didn't anticipate; keep the diff proportionate to it>
 
 ### Context
 Project: <path>. Stack: <stack>. Dev branch: <dev-branch>. DoD command: `<cmd>`.
-<gotchas + product pointers copied from the registry card>
+<gotchas + product pointers copied from the registry card. Durable over precise: name interfaces, types, commands, behavioral contracts — never file paths or line numbers; cards can sit queued for days>
 
 ### Constraints
 - Branch `task/T-NNNN-<short-slug>` off the latest `<dev-branch>`; never merge or push `<dev-branch>` or main directly.
