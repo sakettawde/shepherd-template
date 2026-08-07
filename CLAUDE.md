@@ -32,7 +32,7 @@ cd <your shepherd clone> && claude --remote-control shepherd
 6. **Commit this repo after every ledger/registry/decision state change.** Small commits, message = the transition (e.g. `T-0003: briefed → working`).
 7. **herdr safety:** never run bare `herdr` (opens the TUI); never `herdr server stop`; never close panes/tabs/workspaces you did not create; `--no-focus` for all background work; keep the operator's focus where it is.
 8. If `HERDR_ENV` ≠ `1`, you are not inside herdr: do not run herdr control commands; tell the operator and stop.
-9. Escalations and completions notify via `herdr notification show` (adapter recipe) — completions `--sound done`, escalations `--sound request`.
+9. Escalations and completions notify via `herdr notification show` (adapter recipe) — completions `--sound done`, escalations `--sound request`; Operator `notifications: silent` → no `--sound`.
 
 ## 3. The loop
 

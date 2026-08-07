@@ -19,7 +19,7 @@ git clone <your-copy-of-this-template> shepherd && cd shepherd
 claude
 ```
 
-Then tell Claude: **run the init-shepherd skill**. It gates on the herdr version, interviews you (name, code directory, notification preferences), writes the `## Operator` block in `CLAUDE.md`, registers the two worker hooks in your user-global `~/.claude/settings.json`, and seeds `registry/projects.md` from your code directory.
+Run the clone-and-launch above **from a pane inside herdr** — init-shepherd's environment gate (`HERDR_ENV`, version pin) refuses to run outside it. Then tell Claude: **run the init-shepherd skill**. It gates on the herdr version, interviews you (name, code directory, notification preferences), writes the `## Operator` block in `CLAUDE.md`, registers the two worker hooks in your user-global `~/.claude/settings.json`, and seeds `registry/projects.md` from your code directory.
 
 Daily launch, from a pane inside herdr:
 

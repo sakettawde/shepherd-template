@@ -21,7 +21,8 @@ Fresh clone if `CLAUDE.md` contains the literal line `- name: (run init-shepherd
    import json, os, pathlib
    root = os.environ["SHEPHERD_ROOT"]
    p = pathlib.Path.home() / ".claude" / "settings.json"
-   s = json.loads(p.read_text()) if p.exists() else {}
+   t = p.read_text() if p.exists() else ""
+   s = json.loads(t) if t.strip() else {}
    hooks = s.setdefault("hooks", {})
    def install(event, matcher, script):
        cmd = f"bash '{root}/hooks/{script}'"

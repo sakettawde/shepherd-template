@@ -15,7 +15,7 @@ Onboarding is itself a task — card, branch, worker, verification — so the wh
 4. **Question relay** — on wake, read the report in the card. Relay the worker's numbered questions to the operator **verbatim** in chat (this is the one intake where human answers are the whole point — do not answer them yourself). Wait.
 5. **Bank the answers** — registry card: `## Product` gets What/Why/How + the full Q&A; fields enriched (stack, test, dev-branch, keywords); `## Gotchas` gets scan findings. Seed the project's Claude auto-memory directory (`~/.claude/projects/<encoded-project-path>/memory/`) with durable product facts + MEMORY.md index lines. Log each answer-bank in the card.
 6. **Worker phase 2** — send the worker any answers that change its CLAUDE.md draft or report (single-line messages via adapter R4, or point it at the updated registry card). Worker finalizes, verifies DoD, ends `SHEPHERD: done`.
-7. **Close** — monitor verifies (CLAUDE.md commit on the branch, pushed), retro closes, and retro flips `onboarded: yes  # <date>` + index. The operator merges the small onboarding PR at leisure (preview-URL flow); the registry is authoritative for shepherd either way.
+7. **Close** — monitor verifies (CLAUDE.md commit on the branch, pushed), retro closes, and retro flips `onboarded: yes  # <date>` + index. The operator merges the small onboarding PR at leisure via their normal review flow; the registry is authoritative for shepherd either way.
 
 ## Onboarding Brief template (goes in the card's `## Brief`)
 
