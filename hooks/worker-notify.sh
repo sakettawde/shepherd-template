@@ -26,12 +26,22 @@ except Exception:
 
 kind = data.get("notification_type") or data.get("matcher") or data.get("hook_event_name") or "unknown"
 
+# The docs show the body in two shapes for this one event: flat `message`/`title`
+# ("Notification Hook Input Data") and nested under `notification_data`
+# (Notification reference, both read 2026-08-23 at
+# https://code.claude.com/docs/en/hooks). Read both - the kind alone does not say
+# WHICH permission or WHICH agent, and that is what the operator needs.
+nested = data.get("notification_data")
+nested = nested if isinstance(nested, dict) else {}
+message = (data.get("message") or data.get("title")
+           or nested.get("message") or nested.get("title") or "")
+
 line = {
     "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     "event": "notification",
     "task": os.environ.get("SHEPHERD_TASK_ID"),
     "kind": kind,
-    "message": (data.get("message") or data.get("title") or "")[:200],
+    "message": message[:200],
 }
 with open(os.environ["SHEPHERD_STATUS_FILE"], "a", encoding="utf-8") as f:
     f.write(json.dumps(line, ensure_ascii=False) + "\n")
@@ -46,6 +56,8 @@ PY
 # noise - a fable worker driving background subagents emits one at every turn
 # boundary while a subagent runs, then self-resumes (adapter v0.8.2, R5 notes).
 # An allowlist, not a denylist: a kind nobody has classified is not an alarm.
+# `agent_completed` is recorded and deliberately NOT toasted: a finished worker
+# is the watcher's business (adapter R5), not an interruption for the operator.
 kind=$(cat "$kind_file" 2>/dev/null)
 case "$kind" in
   permission_prompt|elicitation_dialog|agent_needs_input) ;;
