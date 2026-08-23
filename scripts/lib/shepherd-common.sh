@@ -45,12 +45,12 @@ atomic_create() {
 # pane_probe <pane> — tri-state liveness probe against a single pane.
 #   0 = the pane exists and runs a Claude session; prints the session id.
 #   1 = definitively no such pane, or the pane runs no Claude session.
-#   2 = cannot tell (herdr unreachable, no output on either stream, output
+#   2 = unresolved (herdr unreachable, no output on either stream, output
 #       was not JSON, any error code other than "pane_not_found", or a
 #       document with no usable "pane" object). If python3 itself is
 #       missing, this function propagates its shell exit code (127, not 2)
 #       — only shepherd_live's tri-state normalisation folds that into
-#       "cannot tell".
+#       "unresolved".
 # Never trust herdr's exit status. On this machine (herdr 0.7.4) a live
 # pane's document lands on stdout with exit 0; a missing pane's
 # pane_not_found document lands on STDERR with exit 1. Only the JSON body —
@@ -104,29 +104,29 @@ sys.exit(0)
 # pane_session <pane-id> — prints the Claude session id herdr reports.
 # Non-zero (1 or 2 from pane_probe) when it cannot. Implemented in terms of
 # pane_probe: existing and future callers only need "did I get an id", not
-# the distinction between definitively-gone and cannot-tell.
+# the distinction between gone and unresolved.
 pane_session() {
   pane_probe "$1"
 }
 
 # shepherd_live <pane> <session> — tri-state liveness for one holder.
 #   0 = live — the pane exists and runs exactly that session.
-#   1 = definitively dead — the pane is gone, or runs a different session,
+#   1 = gone — the pane is gone, or runs a different session,
 #       or runs none.
-#   2 = cannot tell.
+#   2 = unresolved.
 # Callers written as `if shepherd_live …; then` keep working unchanged,
 # because only 0 is success; a caller that acts on a negative must branch
-# on $? to tell "dead" apart from "cannot tell".
+# on $? to tell "gone" apart from "unresolved".
 #
 # Tests bypass herdr with two space-separated "<pane>:<session>" lists:
 # SHEPHERD_LIVENESS_UNKNOWN (checked first — a listed pair returns 2) and
 # SHEPHERD_LIVENESS_OVERRIDE (a listed pair returns 0, an unlisted one
-# returns 1; setting it empty declares everything dead). This whole hook
+# returns 1; setting it empty declares everything gone). This whole hook
 # pair is gated on hooks_active (SHEPHERD_TEST_HOOKS=1 — see its doc
 # comment): outside a test harness both variables are inert, no matter what
 # they're set to. When the gate is on and EITHER variable is set — even to
 # an empty string — herdr is never called: a pair that matches neither list
-# resolves to 1 (definitively dead). Only when the gate is off, or both
+# resolves to 1 (gone). Only when the gate is off, or both
 # hooks are completely unset, does shepherd_live fall through to a real
 # herdr round-trip via pane_probe.
 shepherd_live() {

@@ -83,8 +83,8 @@ cmd_takeover() {
     echo "REFUSED $name is held by a live instance ($h_holder, pane $h_pane) - never steal from a live holder" >&2
     return 1
   fi
-  # Only an explicit 1 (definitively dead) authorises a takeover - the same
-  # polarity sweep uses. "Cannot tell" is not evidence of death.
+  # Only an explicit 1 (gone) authorises a takeover - the same
+  # polarity sweep uses. "Unresolved" is not evidence that the holder is gone.
   if [ "$live_rc" -ne 1 ]; then
     echo "UNKNOWN-LIVENESS $name $h_holder - cannot reach herdr for pane $h_pane, left in place" >&2
     return 1
@@ -139,7 +139,7 @@ cmd_sweep() {
   local f base holder pane session task ts state age nowsec tssec line live_rc
   [ -d "$LOCKS_DIR" ] || return 0
 
-  # A liveness oracle that cannot answer must never be read as "everyone is dead".
+  # A liveness oracle that cannot answer must never be read as "everyone is gone".
   # Sweep is the only mass-deleting command in the system and it runs unattended
   # at session start, so one herdr outage would otherwise unlink every lock.
   # The test-hook bypass below only applies when hooks_active (SHEPHERD_TEST_HOOKS=1):
@@ -181,7 +181,7 @@ cmd_sweep() {
       continue
     fi
 
-    # Anything other than definitively-dead (1) - cannot tell (2), or any
+    # Anything other than gone (1) - unresolved (2), or any
     # return code shepherd_live's contract does not promise - must never
     # reach the delete logic below. Only an explicit 1 may free a lock.
     # Deleting on an unresolved probe would free a live holder's claim on
@@ -192,7 +192,7 @@ cmd_sweep() {
       continue
     fi
 
-    # live_rc == 1 (definitively dead). The liveness probe above is a herdr
+    # live_rc == 1 (gone). The liveness probe above is a herdr
     # round-trip. Another instance may have swept this same lock and
     # re-acquired the name while we waited. Deleting on the stale read would
     # unlink a LIVE holder's lock and let a third instance into the same

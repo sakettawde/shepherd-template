@@ -41,7 +41,7 @@ bash "$HERE/reserve-task-id.sh" sweep >/dev/null
 check "a live claimant's reservation is never re-issued" "$(ls "$T" | wc -l)" "1"
 export SHEPHERD_LIVENESS_OVERRIDE=""
 bash "$HERE/reserve-task-id.sh" sweep >/dev/null
-check "a dead claimant's reservation is cleared" "$(ls "$T" | wc -l)" "0"
+check "a gone claimant's reservation is cleared" "$(ls "$T" | wc -l)" "0"
 
 say "S12.3 simultaneous same-id boot"
 export HERDR_ENV=1
@@ -86,8 +86,8 @@ check "active task keeps its lock" "$( [ -f "$L/project-a.lock" ] && echo yes ||
 check "closed task frees its lock"  "$( [ -f "$L/project-b.lock" ] && echo yes || echo no )" "no"
 
 say "S12.8 unresolvable liveness never reclaims"
-# shepherd_live is tri-state: 0 live, 1 definitively dead, 2 cannot
-# tell. Only 1 authorises a reclaim. This is the only scenario above that
+# shepherd_live is tri-state: 0 live, 1 gone, 2
+# unresolved. Only 1 authorises a reclaim. This is the only scenario above that
 # exercises the "2" branch, and it deliberately fixtures a CLOSED task
 # (state: done) - the orphan rule already protects an active task regardless
 # of liveness, so an active fixture here would pass even if the liveness

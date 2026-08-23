@@ -41,9 +41,9 @@ export SHEPHERD_LIVENESS_OVERRIDE="w6:p1:sess-1 w6:p2:sess-2"
 assert_fail "second instance cannot take a live id" bash "$I" acquire shepherd-1
 assert_eq "the live holder still owns the lock" "$(awk '{print $2}' "$L/shepherd-1.lock")" "w6:p1"
 
-# a different session claiming a DEAD id takes it over
+# a different session claiming a GONE id takes it over
 export SHEPHERD_LIVENESS_OVERRIDE="w6:p2:sess-2"
-assert_ok "dead id is taken over" bash "$I" acquire shepherd-1
+assert_ok "gone id is taken over" bash "$I" acquire shepherd-1
 assert_eq "lock now names the new pane" "$(awk '{print $2}' "$L/shepherd-1.lock")" "w6:p2"
 
 # a distinct id is independent
@@ -74,8 +74,8 @@ for fun in blue north two-dogs; do
 done
 assert_eq "no lock escaped LOCKS_DIR" "$(find "$SHEPHERD_ROOT" -name 'shepherd-*.lock' -not -path "$L/*" | wc -l)" "0"
 
-# --- tri-state rule: a holder whose liveness cannot be resolved must be
-# refused, not taken over. "cannot tell" must never collapse into "dead".
+# --- tri-state rule: a holder whose liveness is unresolved must be
+# refused, not taken over. "unresolved" must never collapse into "gone".
 # The current holder of shepherd-1 is w6:p2/sess-2 (left there by the
 # takeover above). A third pane tries to acquire it while that holder's
 # liveness is unresolvable, driven with SHEPHERD_LIVENESS_UNKNOWN.
@@ -86,8 +86,8 @@ export SHEPHERD_LIVENESS_UNKNOWN="w6:p2:sess-2"
 out=$(bash "$I" acquire shepherd-1 2>&1 >/dev/null); rc=$?
 assert_eq "unresolvable holder liveness is refused (exit 1), not taken over" "$rc" "1"
 assert_eq "the unresolved holder still owns the lock" "$(awk '{print $2}' "$L/shepherd-1.lock")" "w6:p2"
-assert_eq "refusal message says the holder could not be resolved" \
-  "$(printf '%s' "$out" | grep -c 'could not be resolved')" "1"
+assert_eq "refusal message says the holder is unresolved" \
+  "$(printf '%s' "$out" | grep -c 'is unresolved')" "1"
 unset SHEPHERD_LIVENESS_UNKNOWN
 
 # --- malformed identity lock: refused, never silently stolen (matches
@@ -171,12 +171,12 @@ race_copy() {
 # --- CRITICAL: two instances racing a takeover must not both win. Without
 # the reclaim-lock + re-read guard, a genuinely slow shepherd_live (a real
 # herdr round-trip in production) opens a window: both instances sample
-# the same dead holder, both call shepherd_live, and both delete-then-
+# the same gone holder, both call shepherd_live, and both delete-then-
 # create the identity lock, each believing it now owns the id.
 #
 # Simulated deterministically: shepherd_live is stubbed to, on its one
 # call, plant a RIVAL holder into the identity lock file before returning
-# 1 (definitively dead) - standing in for a second instance that finished
+# 1 (gone) - standing in for a second instance that finished
 # its own takeover during this instance's probe.
 race="$SHEPHERD_ROOT/race-critical"
 race_copy "$race"
@@ -213,22 +213,22 @@ RACESTUB
 # and the only cleaner (lock.sh sweep) runs at session-start step 3, AFTER
 # identity at step 2 has already told the shepherd to stop. For a solo
 # shepherd-1 nothing ever cleared it. The stale reclaim lock's holder is
-# resolved like any other: cleared only when definitively dead.
+# resolved like any other: cleared only when gone.
 export HERDR_PANE_ID=w6:p12
 export SHEPHERD_PANE_SESSION_OVERRIDE=sess-12
 export SHEPHERD_LIVENESS_OVERRIDE="w6:p12:sess-12 w6:pRECLAIMER:sess-reclaimer"
 
-printf 'shepherd-11 w6:pDEAD sess-dead none %s\n' "$(date -Iseconds)" > "$L/shepherd-11.lock"
+printf 'shepherd-11 w6:pGONE sess-gone none %s\n' "$(date -Iseconds)" > "$L/shepherd-11.lock"
 printf 'shepherd-11 w6:pGHOST sess-ghost none %s\n' "$(date -Iseconds)" > "$L/shepherd-11.reclaim.lock"
-assert_ok "a stale reclaim lock whose holder is dead does not wedge the id" \
+assert_ok "a stale reclaim lock whose holder is gone does not wedge the id" \
   bash "$I" acquire shepherd-11
 assert_eq "the id is now held by the booting instance" \
   "$(awk '{print $2}' "$L/shepherd-11.lock")" "w6:p12"
 assert_nofile "and the reclaim lock is released again" "$L/shepherd-11.reclaim.lock"
 
 # ...but a reclaim lock held by a LIVE instance still refuses. "Clear it if
-# dead" must never widen into "clear it".
-printf 'shepherd-13 w6:pDEAD sess-dead none %s\n' "$(date -Iseconds)" > "$L/shepherd-13.lock"
+# gone" must never widen into "clear it".
+printf 'shepherd-13 w6:pGONE sess-gone none %s\n' "$(date -Iseconds)" > "$L/shepherd-13.lock"
 printf 'shepherd-13 w6:pRECLAIMER sess-reclaimer none %s\n' "$(date -Iseconds)" > "$L/shepherd-13.reclaim.lock"
 out=$(bash "$I" acquire shepherd-13 2>&1 >/dev/null); rc=$?
 assert_eq   "a live reclaimer still wins the id" "$rc" "1"
@@ -236,11 +236,11 @@ assert_eq   "and the refusal names the reclaim in progress" \
   "$(printf '%s' "$out" | grep -c 'already reclaiming shepherd-13')" "1"
 assert_file "the live reclaimer's lock is left in place" "$L/shepherd-13.reclaim.lock"
 assert_eq   "and the identity lock is not stolen" \
-  "$(awk '{print $2}' "$L/shepherd-13.lock")" "w6:pDEAD"
+  "$(awk '{print $2}' "$L/shepherd-13.lock")" "w6:pGONE"
 
 # ...and neither does an unresolvable reclaim holder.
 export SHEPHERD_LIVENESS_UNKNOWN="w6:pFOG:sess-fog"
-printf 'shepherd-14 w6:pDEAD sess-dead none %s\n' "$(date -Iseconds)" > "$L/shepherd-14.lock"
+printf 'shepherd-14 w6:pGONE sess-gone none %s\n' "$(date -Iseconds)" > "$L/shepherd-14.lock"
 printf 'shepherd-14 w6:pFOG sess-fog none %s\n' "$(date -Iseconds)" > "$L/shepherd-14.reclaim.lock"
 out=$(bash "$I" acquire shepherd-14 2>&1 >/dev/null); rc=$?
 assert_eq   "an unresolvable reclaim holder is refused, not cleared" "$rc" "1"

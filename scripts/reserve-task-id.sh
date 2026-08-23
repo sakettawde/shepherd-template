@@ -2,7 +2,7 @@
 # Race-free task-id reservation. See docs/specs/multi-shepherd-design.md S4.
 #
 #   reserve-task-id.sh reserve <holder> <pane> <session>   -> prints T-NNNN
-#   reserve-task-id.sh sweep                               -> removes dead reservations
+#   reserve-task-id.sh sweep                               -> removes reservations whose claimant is gone
 #
 # A reserved card holds one line and nothing else:
 #   reserved-by: <holder> <pane> <session> <iso8601>
@@ -49,7 +49,7 @@ cmd_reserve() {
 }
 
 cmd_sweep() {
-  # A liveness oracle that cannot answer must never be read as "every claimant is dead".
+  # A liveness oracle that cannot answer must never be read as "every claimant is gone".
   # Without this, one herdr outage at session start would delete every live reservation.
   # The test-hook bypass below only applies when hooks_active (SHEPHERD_TEST_HOOKS=1):
   # outside a test harness, SHEPHERD_LIVENESS_OVERRIDE/UNKNOWN merely being set
@@ -89,7 +89,7 @@ cmd_sweep() {
           rm -f "$f"; echo "SWEPT $id (reserved by $holder, claimant gone)"
         fi
         ;;
-      # Anything other than definitively-dead (1) - cannot tell (2), or any
+      # Anything other than gone (1) - unresolved (2), or any
       # return code shepherd_live's contract does not promise - must never
       # reach the delete arm. Only an explicit 1 may free a reservation.
       *) echo "UNKNOWN-LIVENESS $id $holder - cannot reach herdr for pane $pane, left in place" ;;

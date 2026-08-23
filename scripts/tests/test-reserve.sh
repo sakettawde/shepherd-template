@@ -30,7 +30,7 @@ assert_eq "all 30 are distinct" "$(sort -u "$SHEPHERD_ROOT/ids.txt" | wc -l)" "3
 assert_eq "every reserved card names a claimant" \
   "$(grep -L '^reserved-by:' "$T"/T-*.md | wc -l)" "0"
 
-# sweep: live claimant is left alone, dead claimant is removed
+# sweep: live claimant is left alone, gone claimant is removed
 rm -rf "$T"; mkdir -p "$T"
 printf 'reserved-by: shepherd-1 w6:p1 sess-1 %s\n' "$(date -Iseconds -d '2 hours ago')" > "$T/T-0001.md"
 printf 'reserved-by: shepherd-9 w6:p9 sess-9 %s\n' "$(date -Iseconds -d '2 hours ago')" > "$T/T-0002.md"
@@ -39,12 +39,12 @@ export SHEPHERD_LIVENESS_OVERRIDE="w6:p1:sess-1"
 
 out=$(bash "$R" sweep)
 assert_file   "live claimant's 2-hour-old reservation survives" "$T/T-0001.md"
-assert_nofile "dead claimant's reservation is removed"          "$T/T-0002.md"
+assert_nofile "gone claimant's reservation is removed"          "$T/T-0002.md"
 assert_file   "a filled card is never touched"                  "$T/T-0003.md"
 assert_eq     "live reservation is reported, not swept" "$(printf '%s' "$out" | grep -c '^RESERVED T-0001')" "1"
 
-# tri-state liveness: a claimant whose liveness cannot be resolved survives
-# the sweep untouched - "cannot tell" must never collapse into "gone".
+# tri-state liveness: a claimant whose liveness is unresolved survives
+# the sweep untouched - "unresolved" must never collapse into "gone".
 rm -rf "$T"; mkdir -p "$T"
 printf 'reserved-by: shepherd-5 w6:p5 sess-5 %s\n' "$(date -Iseconds -d '2 hours ago')" > "$T/T-0005.md"
 export SHEPHERD_LIVENESS_OVERRIDE=""

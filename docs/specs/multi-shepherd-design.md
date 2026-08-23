@@ -74,11 +74,11 @@ At session start the instance attempts an atomic exclusive create (§6). Outcome
 - **Create succeeds** → this instance is `<id>`. Continue.
 - **Create fails and the holder is live** (§3.3) → **refuse to start.** Report the collision to
   the operator and stop. Two instances sharing an id would each believe they own the other's tasks.
-- **Create fails and the holder is dead** → the lock is stale. Delete it, then retry the create
+- **Create fails and the holder is gone** → the lock is stale. Delete it, then retry the create
   once. If the retry also fails, another instance won the race for the same id; refuse to start.
 
 This closes the window v1 left open, where two sessions launched with the same default id could
-both read "absent or dead" before either wrote.
+both read "absent or gone" before either wrote.
 
 ### 3.3 Liveness
 
@@ -102,8 +102,8 @@ Verified directly against the herdr binary at the pinned version; re-verify on a
 
 Exit status alone cannot separate the second case from the third: both can exit non-zero, or
 in principle either could exit 0 in a future herdr release. `pane_not_found` — the code inside
-whichever stream actually carries a document — is what makes "definitively dead" distinguishable
-from "cannot tell". Nothing else in the response reliably does: an unreachable server or a
+whichever stream actually carries a document — is what makes "gone" distinguishable
+from "unresolved". Nothing else in the response reliably does: an unreachable server or a
 malformed document look, from the caller's side, like they could still be hiding a live pane.
 A prior draft of this section stated the opposite — that the failure document arrives on stdout
 with exit 0 — which had never been checked against the real binary.
@@ -116,17 +116,17 @@ document it found — never the exit status:
 | Return | Meaning | Condition |
 |---|---|---|
 | 0 | live | `agent_session` present; prints the session id |
-| 1 | definitively dead | error code is exactly `pane_not_found`, or the pane object carries no usable `agent_session` |
-| 2 | cannot tell | no document on either stream, output was not JSON, any other error code, or no usable pane object at all |
+| 1 | gone | error code is exactly `pane_not_found`, or the pane object carries no usable `agent_session` |
+| 2 | unresolved | no document on either stream, output was not JSON, any other error code, or no usable pane object at all |
 
 `shepherd_live <pane> <session>` composes this with the recorded session id and returns the same
 three values: **0** when the pane exists and runs exactly that session, **1** when the pane is
-gone or runs a different session (or none), **2** when liveness could not be resolved. A pane that
-exists but runs a *different* session is definitively dead — that shepherd is gone and someone
+gone or runs a different session (or none), **2** when liveness is unresolved. A pane that
+exists but runs a *different* session is gone — that shepherd is gone and someone
 else's session occupies the pane — so it is a 1, not a 2.
 
-**A reclaim (deleting a lock, deleting a reservation) happens only on a definitively-dead (1)
-result. A 2 is never treated as evidence of death; it is reported and the reclaim skipped.**
+**A reclaim (deleting a lock, deleting a reservation) happens only on a gone (1)
+result. A 2 is never treated as evidence that the holder is gone; it is reported and the reclaim skipped.**
 Both sweeps (§6.4) implement this: they act on `shepherd_live`'s return value, not on its
 truthiness, so "0 = success" callers written as `if shepherd_live …; then` still work unchanged,
 but a caller that must act on a negative branches on the exact code.
@@ -194,12 +194,12 @@ out of five; 60 concurrent reservation loops yield 60 distinct ids.
 A crash between reserve and fill leaves a card holding only its reservation line.
 
 Cleanup is **gated on holder liveness, never on age**, and liveness is three-valued (§3.3), not
-a live/dead pair:
+a live/gone pair:
 
 - Reservation line names a **live** claimant → leave it alone, however old. An LLM session can
   legitimately sit 30 minutes between two tool calls.
-- Reservation line names a **definitively dead** claimant → delete the file and report it.
-- Claimant liveness **cannot be resolved** → leave the file alone and report `UNKNOWN-LIVENESS`
+- Reservation line names a **gone** claimant → delete the file and report it.
+- Claimant liveness is **unresolved** → leave the file alone and report `UNKNOWN-LIVENESS`
   (§6.4's table, which also documents the sweep output tokens shared by both sweeps). Deleting
   here on nothing more than a failed probe is exactly the defect this section exists to prevent —
   it is never treated as evidence the claimant is gone.
@@ -207,8 +207,8 @@ a live/dead pair:
 v1 deleted these on a 10-minute timer. That was the worst defect in the spec: a stalled
 instance would return, find its reservation deleted and re-issued to another task, and clobber
 that card — two tasks sharing one id, one card destroyed, branch names and status files
-ambiguous. Tri-state liveness closes a narrower version of the same failure: collapsing "cannot
-tell" into "dead" lets one unreachable pane free a live claimant's reservation exactly as the
+ambiguous. Tri-state liveness closes a narrower version of the same failure: collapsing
+"unresolved" into "gone" lets one unreachable pane free a live claimant's reservation exactly as the
 age-based timer once did.
 
 If the deleted id was the highest, the next reservation wins it back. Otherwise it leaves a gap,
@@ -262,7 +262,7 @@ Owner-filtered dispatch needs a wake source, or queues starve. At retro step 6, 
 2. If it is mine → dispatch as usual.
 3. If it belongs to another **live** instance → notify that instance by its remote-control name
    (`SendMessage` to `shepherd-2`), and append a Log line recording the handoff.
-4. If it belongs to a **dead** instance → report it to the operator in one line as awaiting
+4. If it belongs to a **gone** instance → report it to the operator in one line as awaiting
    reassignment (§10). Do not take it unilaterally.
 
 Peer sessions are addressable by their remote-control name.
@@ -293,7 +293,7 @@ in between leaves a holderless lock that a sweeper misreads:
   sweep resolves to a task that does not exist.
 - **takeover** — the sanctioned way to claim a lock whose holder is gone (§10 step 3, §9 step 6).
   No lock present → behaves as `acquire`. Holder **live** → refuse. Liveness **unresolvable** →
-  refuse, with a distinct message; never take over on "cannot tell". Holder **definitively dead**
+  refuse, with a distinct message; never take over on "unresolved". Holder **gone**
   → re-read the line, refuse if it changed since the probe (§6.4's `CHANGED` guard), otherwise
   write the new line to a temp file in the same directory and `mv` it over the target. Atomic
   rename only, never an in-place rewrite.
@@ -306,7 +306,7 @@ in between leaves a holderless lock that a sweeper misreads:
 | Name | Lifetime | Guards |
 |---|---|---|
 | `shepherd-<id>.lock` | whole session | identity (§3.2) |
-| `shepherd-<id>.reclaim.lock` | seconds, during a takeover | serialises two instances reclaiming one dead id (§3.2) |
+| `shepherd-<id>.reclaim.lock` | seconds, during a takeover | serialises two instances reclaiming one gone id (§3.2) |
 | `project-<clone-id>.lock` | dispatch → close-out (hours) | one active task per working copy |
 | `dispatch.lock` | seconds | the worker cap (§6.3) |
 | `card-<slug>.lock` | seconds | read-modify-write of `registry/projects/<slug>.md` |
@@ -402,7 +402,7 @@ Sweep also refuses to run at all when its own liveness oracle cannot answer for 
 if `HERDR_PANE_ID` is unset, or `pane_probe "$HERDR_PANE_ID"` does not return 0, it reports
 `SWEEP-SKIPPED` and inspects nothing. Sweep is the only mass-deleting command in the system,
 running unattended at every session start, so this pre-flight catches a total herdr outage
-before it reads one failure as the death of every instance.
+before it reads one failure as every instance being gone.
 
 That pre-flight catches an outage affecting the sweeping instance itself; it does nothing for a
 per-holder failure — `herdr` answering for most panes but failing for one. So every lock, once
@@ -410,10 +410,10 @@ past the pre-flight, is gated individually on `shepherd_live`'s three-valued res
 
 - **0 (live)** — existing behaviour: kept, and reported `LONG-HELD` if a `card-*`/`dispatch.lock`
   has been held past `LONG_HOLD_SECONDS`.
-- **2 (cannot tell)** — printed as `UNKNOWN-LIVENESS <lock> <holder> - cannot reach herdr for
+- **2 (unresolved)** — printed as `UNKNOWN-LIVENESS <lock> <holder> - cannot reach herdr for
   pane <pane>, left in place` and skipped. Nothing is deleted or re-verified; a liveness answer
   that cannot be trusted is never grounds for a reclaim.
-- **1 (definitively dead)** — the stale path above: the `CHANGED` re-verify, then the table's
+- **1 (gone)** — the stale path above: the `CHANGED` re-verify, then the table's
   delete/keep rule.
 - **anything else** — treated exactly like 2, never like 1. Both sweeps match `1` explicitly for
   the delete arm and route every other value, not only 2, to `UNKNOWN-LIVENESS`; a future
@@ -424,7 +424,7 @@ No reclaim in either sweep can be reached with `shepherd_live` returning anythin
 
 ### 6.5 Live-but-wedged holders
 
-Sweep only clears locks whose holder is dead. A live instance can still hold a "seconds" lock
+Sweep only clears locks whose holder is gone. A live instance can still hold a "seconds" lock
 for a long time — stalled on a permission prompt, blocked on the operator overnight, or
 compacted into forgetting it holds anything. There is no clean automatic answer, so the spec
 states the limits instead of pretending otherwise:
@@ -571,7 +571,7 @@ of them read state that earlier steps change.
    stop here and report.
 3. Read `HERDR_PANE_ID`; get own `agent_session` (adapter R7). Write the registration file.
 4. Sweep stale locks (§6.4). Report anything marked orphaned.
-5. Delete abandoned reservations whose claimant is dead (§4.2).
+5. Delete abandoned reservations whose claimant is gone (§4.2).
 6. **Reconcile self:** every lock naming me must correspond to a card I own, and every active
    card I own must have its project lock. A mismatch means a crash mid-sequence — most likely a
    half-finished reassignment (§10). Report each mismatch to the operator; repair only the unambiguous
@@ -580,7 +580,7 @@ of them read state that earlier steps change.
    or unresolvable, so attempting it is always safe).
 7. List live instances: the identity locks that remain (`ledger/locks/shepherd-*.lock`, ignoring
    `*.reclaim.lock`), each resolved through its recorded pane and session with `shepherd_live`.
-   Step 4 already swept the dead ones, so what remains and answers is the live set. Reported as
+   Step 4 already swept the gone ones, so what remains and answers is the live set. Reported as
    part of step 10's line, not as a separate message (CLAUDE.md §8 step 10).
 8. Grep active cards. Re-arm watchers **only** where `owner:` is me.
 9. Check for my own dispatchable queued cards (§5.4).
@@ -597,7 +597,7 @@ that §9 step 6 can detect:
 2. Set `owner:` on the card. Append a Log line naming both instances and the reason. Commit.
 3. Take `project-<clone-id>.lock`:
    - Not held → acquire normally.
-   - Held by a dead instance under the orphan rule → `lock.sh takeover` (§6), which does the
+   - Held by a gone instance under the orphan rule → `lock.sh takeover` (§6), which does the
      **atomic rename**: write a fresh lock file with my details under a temporary name, then `mv`
      it over the old one. Rename is atomic on
      one filesystem, so no sweeper ever observes a truncated or absent lock. v1 specified an
@@ -655,7 +655,7 @@ which is where v1 actually broke:
 ## 13. Known limits
 
 - **Live-but-wedged holders** cannot be resolved automatically (§6.5). They are reported to the operator.
-- **Orphaned workers.** A dead shepherd's worker keeps running with nobody watching. §6.4 makes
+- **Orphaned workers.** A gone shepherd's worker keeps running with nobody watching. §6.4 makes
   this visible instead of silent, but it still needs the operator to reassign.
 - **Handoff messages are best-effort.** §5.4's backstop turns a lost message into a delay.
 - **FIFO is per-instance.** Two instances may both queue cards for one project; each dispatches
