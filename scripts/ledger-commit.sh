@@ -44,6 +44,20 @@ fi
 # Empty messages are never legitimate - every commit in this system must have a
 # descriptive transition message like "T-0001: captured -> queued".
 
+# Every instance commits its ledger state into this one checkout, concurrently.
+# A task branch checked out here would silently collect all of them, and
+# checking main back out would strand them (F5). Refuse before `git add`, so a
+# refusal leaves the shared index exactly as it found it. `--abbrev-ref` answers
+# `HEAD` for a detached head and for an unborn branch, and the empty string when
+# this is not a repo at all - none of those are main, so all of them refuse.
+# Fail-closed is the point: a refused commit is visible, a misplaced one is not.
+branch=$(git -C "$SHEPHERD_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$branch" != "main" ]; then
+  echo "ledger-commit: refusing to commit ledger state on branch '$branch' (expected main)." >&2
+  echo "ledger-commit: another instance's ledger writes would land here too. Check out main first." >&2
+  exit 1
+fi
+
 if ! out=$(git_retry add -- "$@"); then
   echo "ledger-commit: add failed: $out" >&2
   exit 1
