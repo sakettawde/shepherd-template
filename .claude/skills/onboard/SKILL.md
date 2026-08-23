@@ -9,7 +9,7 @@ Onboarding is itself a task — card, branch, worker, verification — so the wh
 
 ## Flow
 
-1. **Stub the card** — create/refresh `registry/projects/<slug>.md` with known fields, `onboarded: in-progress` (the task gate greps for `yes`, so tasks stay refused), all five sections present (`## Product`, `## Context notes`, `## Gotchas`, `## History`, `## Clones` — CLAUDE.md §5). Then add/update the index row. **Two files, two locks, one at a time** — each path is committed under the lock that guards it, and neither lock is held while the other is taken:
+1. **Stub the card** — create/refresh `registry/projects/<slug>.md` with known fields, `onboarded: in-progress` (the task gate greps for `yes`, so tasks stay refused), `working-agreement:` from CLAUDE.md §5's check run now (a repo that already carries a CLAUDE.md on its dev branch is recorded as such from the start; everything else is `none` until step 7), all five sections present (`## Product`, `## Context notes`, `## Gotchas`, `## History`, `## Clones` — CLAUDE.md §5). Then add/update the index row. **Two files, two locks, one at a time** — each path is committed under the lock that guards it, and neither lock is held while the other is taken:
 
    ```bash
    scripts/lock.sh acquire "card-<slug>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
@@ -29,7 +29,7 @@ Onboarding is itself a task — card, branch, worker, verification — so the wh
 4. **Question relay** — on wake, read the report in the card. Relay the worker's numbered questions to the operator **verbatim** in chat, all in one message (this is the one intake where human answers are the whole point — do not answer them yourself). Where the scan or registry suggests a likely answer, append `➡️ suggested:` under that question so the operator can confirm with one word or override — a suggestion is never banked as an answer without their confirmation. Wait.
 5. **Bank the answers** — registry card: `## Product` gets What/Why/How + the full Q&A; fields enriched (stack, test, dev-branch, keywords); `## Gotchas` gets scan findings. Seed the project's Claude auto-memory directory (`~/.claude/projects/<encoded-project-path>/memory/`) with durable product facts + MEMORY.md index lines. Log each answer-bank in the card.
 6. **Worker phase 2** — send the worker any answers that change its CLAUDE.md draft or report (single-line messages via adapter R4, or point it at the updated registry card). Worker finalizes, verifies DoD, ends `SHEPHERD: done`.
-7. **Close** — monitor verifies (CLAUDE.md commit on the branch, pushed), retro closes, and retro flips `onboarded: yes  # <date>` on the card and the matching index row. Two files again, so the same two locks as step 1, each committing only its own path:
+7. **Close** — monitor verifies (CLAUDE.md commit on the branch, pushed), retro closes, and retro flips `onboarded: yes  # <date>` on the card and the matching index row, **and sets `working-agreement:` in that same locked edit**. Run CLAUDE.md §5's check inside the lock and take its answer rather than the state of the PR: it prints `<dev-branch>` when the file is readable there, and prints nothing when it is not — in which case the value is `task/T-NNNN-onboard`, the branch this task pushed the file to. The two fields answer different questions and routinely disagree at this moment: shepherd has the context, the worker still cannot read it. Two files again, so the same two locks as step 1, each committing only its own path:
 
    ```bash
    scripts/lock.sh acquire "card-<slug>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
@@ -43,7 +43,7 @@ Onboarding is itself a task — card, branch, worker, verification — so the wh
    scripts/lock.sh release card-_index "$SHEPHERD_ID"
    ```
 
-   The operator merges the small onboarding PR at leisure via their normal review flow; the registry is authoritative for shepherd either way.
+   The operator merges the small onboarding PR at leisure via their normal review flow. Until they do, `working-agreement:` names the task branch, and every Brief for this project inlines the four standing rules instead of pointing at a file the worker cannot open (CLAUDE.md §6; triage step 4). Dispatch re-runs the check at every launch and flips the field to `<dev-branch>` on the first dispatch after the merge, so nobody has to remember to come back to it.
 
 ## Onboarding Brief template (goes in the card's `## Brief`)
 
@@ -61,6 +61,7 @@ Produce a product-perspective understanding of <slug> and install shepherd's wor
    - Never merge or push `<dev-branch>` or main. Push only your task branch; after pushing, check out `<dev-branch>` again so the repo rests in a neutral state.
    - Run `<test-command>` before claiming done.
    - Repo-specific quirks you discovered (deploy cautions, generated files, env handling).
+   These four rules are the ones `templates/task-card.md` inlines when `working-agreement:` is not the dev branch. Keep the two in step: a rule you add here and nowhere else is invisible to every worker in a repo whose CLAUDE.md is unreachable.
    Preserve all existing CLAUDE.md content — append/merge, never overwrite. Write rules per <shepherd-root>/docs/writing-for-agents.md: positive phrasing, no restating what config files already answer, every rule earning its always-loaded cost.
 3. Commit CLAUDE.md on branch `task/T-NNNN-onboard` and push it.
 
