@@ -38,7 +38,7 @@ description: Send a queued task to a worker Claude in a herdr pane. Use after a 
 
 ## Steps
 
-0. **Clone target only** — if the card's `project:` carries a `~N` suffix and the registry `## Clones` table has no row for it, create the working copy first. **The card may have no `## Clones` section at all** — a card written before clones existed will not, and nothing seeds one. Create the section (heading + the `| clone-id | path | active-task | pane |` header row) in the same locked edit that appends the first row; place it with the card's other sections, and never in place of one. The fetch, worktree, seed and install run **outside** any lock; only the Clones-row append is locked.
+0. **Clone target only** — if the card's `project:` carries a `~N` suffix and the registry `## Clones` table has no row for it, create the working copy first. **The card may have no `## Clones` section at all** — cards created before 2026-08-22 may lack it, and nothing seeds one. Create the section (heading + the `| clone-id | path | active-task | pane |` header row) in the same locked edit that appends the first row; place it with the card's other sections, and never in place of one. The fetch, worktree, seed and install run **outside** any lock; only the Clones-row append is locked.
 
    ```bash
    git -C <parent-path> fetch origin
