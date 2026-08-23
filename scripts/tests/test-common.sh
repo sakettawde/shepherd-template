@@ -53,8 +53,8 @@ assert_eq "no temp files left behind" "$(find "$SHEPHERD_ROOT/ledger/locks" -nam
 # --- shepherd_live honours the test override ---
 export SHEPHERD_LIVENESS_OVERRIDE="w6:p1:sess-1 w6:p9:sess-9"
 assert_ok   "declared-live pane is live"      shepherd_live "w6:p1" "sess-1"
-assert_fail "unlisted pane is dead"           shepherd_live "w6:p2" "sess-2"
-assert_fail "right pane wrong session is dead" shepherd_live "w6:p1" "sess-OTHER"
+assert_fail "unlisted pane is gone"           shepherd_live "w6:p2" "sess-2"
+assert_fail "right pane wrong session is gone" shepherd_live "w6:p1" "sess-OTHER"
 export SHEPHERD_LIVENESS_OVERRIDE=""
 assert_fail "empty override means nothing is live" shepherd_live "w6:p1" "sess-1"
 

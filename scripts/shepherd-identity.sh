@@ -99,23 +99,23 @@ cmd_acquire() {
   shepherd_live "$h_pane" "$h_session"
   live_rc=$?
   if [ "$live_rc" -ne 1 ]; then
-    # Only an explicit 1 (definitively dead) authorises a takeover, the
-    # same safe polarity lock.sh's sweep uses. Live (0), cannot-tell (2),
+    # Only an explicit 1 (gone) authorises a takeover, the
+    # same safe polarity lock.sh's sweep uses. Live (0), unresolved (2),
     # and any code shepherd_live's contract does not promise must all
     # refuse. Two sessions running as the same shepherd id, each believing
     # it owns the other's tasks, is exactly what this lock exists to
-    # prevent, and an unresolved probe is not evidence of death.
+    # prevent, and an unresolved probe is not evidence that the holder is gone.
     if [ "$live_rc" -eq 0 ]; then
       echo "REFUSE: $id is already live in pane $h_pane (session $h_session). Launch with a different SHEPHERD_ID." >&2
     else
-      echo "REFUSE: $id's holder (pane $h_pane, session $h_session) could not be resolved - refusing to guess. Launch with a different SHEPHERD_ID." >&2
+      echo "REFUSE: $id's holder (pane $h_pane, session $h_session) is unresolved - refusing to guess. Launch with a different SHEPHERD_ID." >&2
     fi
     return 1
   fi
 
-  # live_rc == 1: the holder looked definitively dead a moment ago.
+  # live_rc == 1: the holder looked gone a moment ago.
   # shepherd_live made a subprocess round-trip (mktemp + herdr + python3);
-  # another instance may have sampled this same dead holder and be mid-
+  # another instance may have sampled this same gone holder and be mid-
   # takeover right now, or have already finished. A reclaim lock plus a
   # re-read closes that window - the same compare-before-delete pattern
   # lock.sh's own sweep uses for exactly this race (S6.4). Only the
@@ -130,8 +130,8 @@ cmd_acquire() {
   # only cleaner is `lock.sh sweep`, which runs at session-start step 3,
   # AFTER identity at step 2 tells the shepherd to stop, so for a solo
   # shepherd-1 nothing would ever clear it. takeover resolves the reclaim
-  # holder's liveness and takes it only on a definitively-dead answer -
-  # never on age, never on "cannot tell" - so a live rival still wins.
+  # holder's liveness and takes it only on a gone answer -
+  # never on age, never on "unresolved" - so a live rival still wins.
   r_out=$(bash "$HERE/lock.sh" takeover "$reclaim" "$id" "$pane" "$session" none 2>&1)
   r_rc=$?
   if [ "$r_rc" -ne 0 ]; then
@@ -169,7 +169,7 @@ cmd_acquire() {
     echo "ERROR: took over $id but could not write its registration" >&2
     return 2
   fi
-  echo "IDENTITY $id pane=$pane session=$session (took over from a dead instance)"
+  echo "IDENTITY $id pane=$pane session=$session (took over from a gone instance)"
   return 0
 }
 

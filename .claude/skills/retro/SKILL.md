@@ -33,12 +33,12 @@ description: Close out a task after monitor verified it done (or declared it fai
    ```
 
    Release the project lock even when the close-out is a failure — a held lock strands the working copy for every instance.
-7. **Next** — find the oldest `queued` card for that working copy:
+7. **Context check, then next** — run `scripts/self-recycle.sh decide` first (CLAUDE.md §8): `recycle` → adapter R10 now and let session-start recovery (§8 step 9) dispatch the next card on the fresh context; otherwise find the oldest `queued` card for that working copy:
    - **Yours** → invoke dispatch, if the worker cap has headroom.
    - **Another instance's** → look up its pane and session first: `scripts/lock.sh check <owner-id>` prints `HELD <owner-id> <holder> <pane> <session> <task> <acquired>` — the 4th and 5th fields are what `shepherd_live` needs (adapter R7 "peer identity"). Resolve liveness, tri-state:
      - **Live** → send that instance one message by its remote-control name (`SendMessage` to its `shepherd-<name>` id) naming the freed working copy and the card, and append a Log line recording the handoff. Do not dispatch it.
-     - **Definitively dead** → report it to the operator in one line as awaiting reassignment. Do not take it.
-     - **Cannot tell** → send the message anyway — it costs nothing if the peer turns out to be dead, and clears the stall if it's actually alive — then report it to the operator as unresolved. Do not take it. The peer's own session-start queued-card check (CLAUDE.md §8) only re-runs at that instance's own restart, not per wake, so an unreachable-but-live peer can otherwise sit on the card indefinitely; the report is the real safety net here, not the backstop.
+     - **Gone** → report it to the operator in one line as awaiting reassignment. Do not take it.
+     - **Unresolved** → send the message anyway — it costs nothing if the peer turns out to be gone, and clears the stall if it's actually alive — then report it to the operator as unresolved. Do not take it. The peer's own session-start queued-card check (CLAUDE.md §8) only re-runs at that instance's own restart, not per wake, so an unreachable-but-live peer can otherwise sit on the card indefinitely; the report is the real safety net here, not the backstop.
 
 Failed tasks: same flow, plus the failure reason goes to `## Gotchas` as a guardrail, and any retry is created as a NEW task at **heavy** tier referencing the failed card. The retry card's Brief MUST include a `### Prior attempts` section — what was tried, what failed, why (from the failed card's Log + status file) — and, when the failure was over-scope or a dead-end approach, a steer to attack from a different angle. Never clean-slate a retry.
 

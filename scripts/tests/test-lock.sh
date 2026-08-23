@@ -92,9 +92,9 @@ assert_eq "and records five fields" "$(awk '{print NF}' "$LK/validate-ok.lock")"
 
 # --- takeover ---------------------------------------------------------------
 # CLAUDE.md §8 step 6, §4a and spec §10 step 3 all require taking over a
-# project lock held by a dead instance. acquire returns HELD, release returns
+# project lock held by a gone instance. acquire returns HELD, release returns
 # REFUSED, and sweep deliberately keeps the lock (orphan rule) - takeover is
-# the only command that does it, and only on a definitively-dead holder.
+# the only command that does it, and only on a gone holder.
 export SHEPHERD_LIVENESS_OVERRIDE="w6:pLIVE:sess-live w6:pME:sess-me"
 
 # no lock at all -> plain acquire
@@ -127,27 +127,27 @@ assert_eq "takeover of a malformed lock is refused" "$rc" "1"
 assert_eq "and is reported MALFORMED" "$(printf '%s' "$out" | grep -c '^MALFORMED to-bad')" "1"
 assert_file "the malformed lock is left in place" "$LK/to-bad.lock"
 
-# definitively dead holder -> taken over by atomic rename
-printf 'shepherd-1 w6:pDEAD sess-dead T-0206 %s\n' "$(date -Iseconds)" > "$LK/to-dead.lock"
-out=$(bash "$LOCK" takeover to-dead shepherd-2 w6:pME sess-me T-0207); rc=$?
-assert_eq "takeover of a dead holder's lock succeeds" "$rc" "0"
-assert_eq "and reports TOOK-OVER" "$(printf '%s' "$out" | grep -c '^TOOK-OVER to-dead')" "1"
-assert_eq "the lock now names the new holder" "$(awk '{print $1, $2, $3, $4}' "$LK/to-dead.lock")" \
+# gone holder -> taken over by atomic rename
+printf 'shepherd-1 w6:pGONE sess-gone T-0206 %s\n' "$(date -Iseconds)" > "$LK/to-gone.lock"
+out=$(bash "$LOCK" takeover to-gone shepherd-2 w6:pME sess-me T-0207); rc=$?
+assert_eq "takeover of a gone holder's lock succeeds" "$rc" "0"
+assert_eq "and reports TOOK-OVER" "$(printf '%s' "$out" | grep -c '^TOOK-OVER to-gone')" "1"
+assert_eq "the lock now names the new holder" "$(awk '{print $1, $2, $3, $4}' "$LK/to-gone.lock")" \
   "shepherd-2 w6:pME sess-me T-0207"
 assert_eq "the lock is still exactly one line of five fields" \
-  "$(awk 'END{print NR}' "$LK/to-dead.lock") $(awk '{print NF}' "$LK/to-dead.lock")" "1 5"
+  "$(awk 'END{print NR}' "$LK/to-gone.lock") $(awk '{print NF}' "$LK/to-gone.lock")" "1 5"
 assert_eq "the rename left no temp file behind" \
   "$(find "$LK" -maxdepth 1 -name '.tmp.*' | wc -l)" "0"
 
 # a takeover that would field-shift the line is refused like an acquire
-out=$(bash "$LOCK" takeover to-dead "" w6:pME sess-me T-0208 2>&1); rc=$?
+out=$(bash "$LOCK" takeover to-gone "" w6:pME sess-me T-0208 2>&1); rc=$?
 assert_eq "takeover validates its fields too" "$rc" "2"
-assert_eq "and the previous takeover's line is untouched" "$(awk '{print $1}' "$LK/to-dead.lock")" "shepherd-2"
+assert_eq "and the previous takeover's line is untouched" "$(awk '{print $1}' "$LK/to-gone.lock")" "shepherd-2"
 
 # the line changed during the liveness probe -> refused, never overwritten.
 # Same racestub technique as test-reserve.sh: the probe IS the round-trip the
 # race window depends on, so the stub rewrites the lock as a side effect of
-# being asked about the holder's pane, then reports it dead.
+# being asked about the holder's pane, then reports it gone.
 unset SHEPHERD_LIVENESS_OVERRIDE SHEPHERD_LIVENESS_UNKNOWN
 printf 'shepherd-1 w6:pRACE sess-race T-0209 %s\n' "$(date -Iseconds)" > "$LK/to-race.lock"
 racestub="$SHEPHERD_ROOT/racestub"; mkdir -p "$racestub"

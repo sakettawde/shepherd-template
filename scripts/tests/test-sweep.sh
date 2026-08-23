@@ -45,7 +45,7 @@ mklock project-briefed     shepherd-9 w6:p9 sess-9 T-0105 "$(date -Iseconds)"
 mklock project-review      shepherd-9 w6:p9 sess-9 T-0106 "$(date -Iseconds)"
 # A lock whose line cannot be parsed must be reported and left alone. Named
 # card-* deliberately: that arm deletes unconditionally once the holder is
-# dead, so removing the MALFORMED guard both loses the report and unlinks
+# gone, so removing the MALFORMED guard both loses the report and unlinks
 # the file - a lock nobody can account for, gone without a trace.
 printf '\n' > "$L/card-malformed.lock"
 
@@ -56,8 +56,8 @@ assert_eq "sweep skips when the liveness oracle cannot answer" \
   "$(printf '%s' "$out_skip" | grep -c '^SWEEP-SKIPPED')" "1"
 assert_eq "and deletes nothing" "$(ls "$L" | wc -l)" "$before"
 
-# shepherd-7's liveness cannot be resolved: both lock kinds must be left in
-# place, not deleted - "cannot tell" must never collapse into "gone".
+# shepherd-7's liveness is unresolved: both lock kinds must be left in
+# place, not deleted - "unresolved" must never collapse into "gone".
 export SHEPHERD_LIVENESS_UNKNOWN="w6:p7:sess-7"
 
 # Now run the main sweep with liveness override
