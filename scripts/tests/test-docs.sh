@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# The manual and the skills are the product here, so their invariants get
+# assertions rather than promises. This file reads the repo in place: it takes
+# no sandbox and writes nothing.
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$HERE/harness.sh"
+ROOT=$(cd "$HERE/../.." && pwd)
+
+echo "test-docs:"
+
+# --- working-agreement: reaches every surface that has to know about it ------
+# The field only works if the writer, both readers and the template agree. A
+# surface that never learned the field silently goes back to the T-0084
+# behaviour: a Brief pointing at a CLAUDE.md the worker cannot open.
+for f in CLAUDE.md \
+         templates/task-card.md \
+         .claude/skills/onboard/SKILL.md \
+         .claude/skills/triage/SKILL.md \
+         .claude/skills/dispatch/SKILL.md; do
+  assert_ok "working-agreement: is known to $f" grep -q 'working-agreement:' "$ROOT/$f"
+done
+
+# One spelling, everywhere. Every field is greped for by name, so an
+# underscore or a stray capital reads as the field being absent.
+tokens=$(grep -rhoiE 'working[-_]agreement:' \
+           --include='*.md' --include='*.sh' "$ROOT" 2>/dev/null | sort -u)
+assert_eq "one spelling of the field, everywhere" "$tokens" "working-agreement:"
+
+# --- CLAUDE.md is the field's spec home -------------------------------------
+assert_ok "CLAUDE.md documents the 'none' value" \
+  grep -q '`none` when the repo has no CLAUDE.md' "$ROOT/CLAUDE.md"
+# The ref guard is the part a reader is most likely to drop as redundant, and
+# dropping it makes a never-fetched checkout report 'no working agreement'.
+assert_ok "the check fetches before it reads" grep -q 'fetch origin --quiet' "$ROOT/CLAUDE.md"
+assert_ok "the check verifies the ref before the path" \
+  grep -q 'rev-parse --verify --quiet' "$ROOT/CLAUDE.md"
+assert_ok "the check tests the path at the ref" grep -q 'cat-file -e' "$ROOT/CLAUDE.md"
+
+# --- the inlined rules exist, and there are four of them --------------------
+rules=$(sed -n '/^\*\*This repo has no CLAUDE.md/,/^>/p' "$ROOT/templates/task-card.md" \
+          | grep -cE '^[0-9]+\. ')
+assert_eq "the template inlines four standing rules" "$rules" "4"
+
+# --- dispatch's preconditions stay numbered in sequence ---------------------
+# Inserting a precondition renumbers the rest, and three lines in ## Steps
+# point back at them by index.
+nums=$(sed -n '/^## Preconditions/,/^## Steps/p' "$ROOT/.claude/skills/dispatch/SKILL.md" \
+         | grep -oE '^[0-9]+\.' | tr -d '.')
+expected=$(seq 1 "$(printf '%s\n' "$nums" | grep -c .)")
+assert_eq "dispatch preconditions are numbered 1..N with no gaps" \
+  "$(printf '%s\n' "$nums")" "$(printf '%s\n' "$expected")"
+
+last=$(printf '%s\n' "$nums" | tail -1)
+dangling=$(grep -oE '[Pp]recondition[s]? item [0-9]+|precondition [0-9]+' \
+             "$ROOT/.claude/skills/dispatch/SKILL.md" \
+           | grep -oE '[0-9]+' | awk -v n="$last" '$1 < 1 || $1 > n')
+assert_eq "no Steps line points at a precondition that does not exist" "$dangling" ""
+
+finish

@@ -88,6 +88,18 @@ Registry cards: update fields and append to sections **in place — never drop a
 
 `## Clones` is a table of the extra working copies of that repo — `| clone-id | path | active-task | pane |` — created by dispatch step 0 when a `~N` task first needs one, cleared (not deleted) by retro at close-out. Two optional card fields feed it, both defaulted when absent: `clone-seed:` (paths copied from the parent checkout into a fresh worktree, default `.dev.vars .env .env.local`) and `install:` (run once in the new worktree, default `npm install`). A worktree without them fails the DoD command for reasons that have nothing to do with the task.
 
+`working-agreement:` names the branch on which that project's own CLAUDE.md is actually readable: the dev branch once it has merged, the branch the file still sits on while an onboarding PR is open, or `none` when the repo has no CLAUDE.md at all. It is independent of `onboarded:` — that field says *shepherd* holds the project's context, this one says whether the **worker** can read the working agreement on the branch it checks out. Only this field decides whether a Brief must inline the standing rules (§6). Set it from the check below and never from whether a PR is open, because a card that reasons from the PR goes stale the moment the PR merges:
+
+```bash
+git -C <path> fetch origin --quiet
+if git -C <path> rev-parse --verify --quiet "origin/<dev-branch>" >/dev/null \
+   && git -C <path> cat-file -e "origin/<dev-branch>:CLAUDE.md" 2>/dev/null; then
+  echo "<dev-branch>"   # reachable - a Brief may point the worker at the file
+fi
+```
+
+Run `rev-parse` first, and keep both redirects. `cat-file -e` exits **128 for a missing path and for a ref that does not exist alike**, and writes `fatal:` to stderr — so a checkout that has never fetched `origin/<dev-branch>` reads as "no working agreement" unless the ref is confirmed separately (measured on git 2.43.0; `-e` is "verify its existence", git-cat-file.adoc, read 2026-08-23).
+
 `captured` vs `queued` is load-bearing, not cosmetic: **`queued` means "dispatch me when a slot frees"** — retro's step 7 and the dispatch skill both pick the oldest queued card for a project automatically. **`captured` is the backlog**: a real card with a live Brief that nobody has scheduled. Park a task the operator has deprioritised in `captured`, never in `queued`, or a later close-out will start it on its own. Promote it back to `queued` only on their word.
 
 `<shepherd-root>` in skill recipes = the absolute path of this clone; resolve it from your session's working directory at dispatch time.
@@ -101,6 +113,7 @@ grep -lE "^state: (briefed|working|blocked|review)" ledger/tasks/T-*.md  # activ
 grep -lE "^project: <slug>$" ledger/tasks/T-*.md                 # ONE working copy - the $ keeps <slug>~2 out
 grep -lE "^project: <slug>(~[0-9]+)?$" ledger/tasks/T-*.md       # the project and all its clones
 grep -l "^onboarded: yes" registry/projects/*.md                 # workable projects
+grep -H "^working-agreement:" registry/projects/*.md             # where each project's CLAUDE.md is readable
 ```
 
 Dispatch selection is owner-filtered, so `state: queued` alone is **not** "dispatchable by you" — pair it with the `owner:` filter. When you are `shepherd-1`, add the cards that carry no `owner:` line at all (`xargs -r grep -L "^owner: "`); they are yours by §2 rule 10.
@@ -110,7 +123,7 @@ Dispatch selection is owner-filtered, so `state: queued` alone is **not** "dispa
 - The Brief lives in the task card; the kickoff is a one-line pointer to it. Keep anything sent through a pane single-line and free of double quotes.
 - **Briefs, not plans:** write rich, detailed briefs (objective, context, constraints, DoD) and let the worker do its own planning — never pre-plan the implementation for it.
 - Launch: `claude --model opus --effort <high|xhigh> --permission-mode auto` with env `SHEPHERD_TASK_ID` + `SHEPHERD_STATUS_FILE`. **Tier standard = opus/high; heavy = opus/xhigh** (unique, large, critical, or retry work). **Every worker runs Opus.** Another model — `fable`, say — is launched only when the operator specifically asks for it, and then only at `high`; never `fable --effort max`, the slowest and most expensive configuration available. Effort is a real cost lever, not a quality dial: `high` is the balance point, `xhigh` buys depth on long-horizon agentic work, `max` is reserved for correctness-over-cost and is not on this ladder. Check current per-token pricing against the live model docs before departing from the default (§2 rule 11).
-- Repo-specific standing rules (git sync before work, branch naming, push after complete, test before done) live in **each project's own CLAUDE.md** — written at onboarding. It is the single authoritative source: the Brief references it, never restates it. Brief Constraints carry only task-specific facts and hard lines (branch name, no direct merge/push to dev/main, brainstorming mandate).
+- Repo-specific standing rules (git sync before work, branch naming, push after complete, test before done) live in **each project's own CLAUDE.md** — written at onboarding. It is the single authoritative source: the Brief references it, never restates it. Brief Constraints carry only task-specific facts and hard lines (branch name, no direct merge/push to dev/main, brainstorming mandate). That reference holds only while the file is readable on the branch the worker checks out, and the registry card's `working-agreement:` field (§5) records whether it is. When that field is not the dev branch the worker cannot open the file at all, so triage inlines the four standing rules into the Brief's `### Context` instead, and dispatch repairs a Brief that reached it without them.
 - Close-out default: verified work lands on the project's dev branch (merge the task branch; keep a dev→main PR open where the project uses one). Docs-only changes merge immediately once verified. Never leave verified work unmerged — adjust per project in its CLAUDE.md if its flow differs.
 - Workers end every pause and final message with `SHEPHERD: done|blocked|failed|working — <one-liner>`, on a line of its own. `working` is the mid-task progress checkpoint and is never terminal; the three others are. The Stop hook records the **last such line** in the turn, so a worker that merely writes *about* a claim inside a paragraph no longer records one.
 - Destructive git (force push, protected-branch push, `reset --hard`, …) is mechanically blocked in worker sessions by the user-global `hooks/worker-git-guardrail.sh` PreToolUse hook (gated on `SHEPHERD_TASK_ID`); a blocked worker reports `SHEPHERD: blocked` and the op flows through §4.
