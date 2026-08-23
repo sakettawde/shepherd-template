@@ -37,9 +37,29 @@
 
 INPUT=$(cat)
 # jq is not guaranteed on worker machines (WSL); python3 is. If even that fails,
-# match against the raw JSON — spaces/letters survive JSON escaping, so patterns
-# still hit and the failure mode stays fail-closed, not fail-open.
-COMMAND=$(printf '%s' "$INPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' 2>/dev/null) || COMMAND="$INPUT"
+# match against the raw JSON envelope: spaces and letters survive JSON escaping,
+# so the patterns still hit and the failure mode stays fail-closed, not
+# fail-open. Whitespace does not survive it, which is what the decoding is for.
+COMMAND=$(printf '%s' "$INPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' 2>/dev/null) || {
+  # The raw JSON carries the command's whitespace as the two-character escapes
+  # \t and \n, which the normalisation below never sees. Undecoded they cut
+  # both ways: a tab-separated destructive command slips the fallback entirely,
+  # and two commands joined by a newline read as one and block on a flag that
+  # belongs to neither. Decode the whitespace escapes here, so both paths hand
+  # normalisation the same real characters.
+  #
+  # Escaped backslashes come out first and go back last. A literal backslash
+  # arrives as \\, and reading the second one together with a following `t`
+  # would turn the two-character text \t into a tab that the worker never
+  # typed. \001 is the parking space: JSON writes a real control byte as
+  # a backslash-u escape, so one cannot reach here inside the envelope.
+  COMMAND=$INPUT
+  COMMAND=${COMMAND//\\\\/$'\001'}
+  COMMAND=${COMMAND//\\t/$'\t'}
+  COMMAND=${COMMAND//\\n/$'\n'}
+  COMMAND=${COMMAND//\\r/ }
+  COMMAND=${COMMAND//$'\001'/\\}
+}
 
 [ -z "$COMMAND" ] && exit 0
 
@@ -82,24 +102,34 @@ done
 # Protected integration branches; extend per project at onboarding if needed.
 PROTECTED='(main|master|dev|develop)'
 
+# `git` has to be a whole word. Every pattern below anchors on the sequence
+# `git <subcommand>`, and the three letters sit inside ordinary words: without
+# this guard `legit push --force` and `mygit branch -D b` block on shepherd's
+# git rules, and a program called `deploy-git` cannot use its own subcommands
+# at all. The boundary is the one normalisation already uses above — an
+# alphanumeric, `_` or `-` before those letters means another word, while `^`,
+# a space or the `/` of `/usr/bin/git` means a real invocation. Use GIT in every
+# pattern, so a tenth pattern cannot be added without the guard.
+GIT='(^|[^[:alnum:]_-])git'
+
 block() {
   echo "BLOCKED by shepherd guardrail: '$1'. Destructive git is escalation-only. Do not retry or work around this — pause and end your message with: SHEPHERD: blocked — need approval for: $1" >&2
   exit 2
 }
 
 # Force push (any remote/refspec), incl. --force-with-lease and +refspec form
-echo "$COMMAND" | grep -qE 'git +push +[^|;&]*(--force|-f\b|--force-with-lease)' && block "force push"
-echo "$COMMAND" | grep -qE 'git +push +[^|;&]* \+[^ ]' && block "forced refspec push"
+echo "$COMMAND" | grep -qE "${GIT} +push +[^|;&]*(--force|-f\b|--force-with-lease)" && block "force push"
+echo "$COMMAND" | grep -qE "${GIT} +push +[^|;&]* \+[^ ]" && block "forced refspec push"
 
 # Push to / deletion of protected branches ([ /:] catches origin/dev and HEAD:dev forms)
-echo "$COMMAND" | grep -qE "git +push +[^|;&]*[ /:]${PROTECTED}( |\$|:)" && block "push touching a protected branch"
-echo "$COMMAND" | grep -qE 'git +push +[^|;&]*(--delete| :[a-zA-Z0-9_/-]+)' && block "remote branch deletion"
+echo "$COMMAND" | grep -qE "${GIT} +push +[^|;&]*[ /:]${PROTECTED}( |\$|:)" && block "push touching a protected branch"
+echo "$COMMAND" | grep -qE "${GIT} +push +[^|;&]*(--delete| :[a-zA-Z0-9_/-]+)" && block "remote branch deletion"
 
 # History / worktree destruction
-echo "$COMMAND" | grep -qE 'git +reset +[^|;&]*--hard' && block "git reset --hard"
-echo "$COMMAND" | grep -qE 'git +clean +[^|;&]*-[a-zA-Z]*f' && block "git clean -f"
-echo "$COMMAND" | grep -qE 'git +branch +[^|;&]*-D\b' && block "git branch -D"
-echo "$COMMAND" | grep -qE 'git +(checkout|restore) +\.( |$)' && block "discard working tree"
-echo "$COMMAND" | grep -qE 'git +stash +(drop|clear)' && block "git stash drop/clear"
+echo "$COMMAND" | grep -qE "${GIT} +reset +[^|;&]*--hard" && block "git reset --hard"
+echo "$COMMAND" | grep -qE "${GIT} +clean +[^|;&]*-[a-zA-Z]*f" && block "git clean -f"
+echo "$COMMAND" | grep -qE "${GIT} +branch +[^|;&]*-D\b" && block "git branch -D"
+echo "$COMMAND" | grep -qE "${GIT} +(checkout|restore) +\.( |\$)" && block "discard working tree"
+echo "$COMMAND" | grep -qE "${GIT} +stash +(drop|clear)" && block "git stash drop/clear"
 
 exit 0
