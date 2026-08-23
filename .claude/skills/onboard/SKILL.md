@@ -9,13 +9,41 @@ Onboarding is itself a task — card, branch, worker, verification — so the wh
 
 ## Flow
 
-1. **Stub the card** — create/refresh `registry/projects/<slug>.md` with known fields, `onboarded: in-progress` (the task gate greps for `yes`, so tasks stay refused), all four sections present. Add/update the index row.
+1. **Stub the card** — create/refresh `registry/projects/<slug>.md` with known fields, `onboarded: in-progress` (the task gate greps for `yes`, so tasks stay refused), all five sections present (`## Product`, `## Context notes`, `## Gotchas`, `## History`, `## Clones` — CLAUDE.md §5). Then add/update the index row. **Two files, two locks, one at a time** — each path is committed under the lock that guards it, and neither lock is held while the other is taken:
+
+   ```bash
+   scripts/lock.sh acquire "card-<slug>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
+   # re-read registry/projects/<slug>.md from disk, write the stub, then:
+   scripts/ledger-commit.sh "registry: <slug> card stub" registry/projects/<slug>.md
+   scripts/lock.sh release "card-<slug>" "$SHEPHERD_ID"
+
+   scripts/lock.sh acquire card-_index "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
+   # re-read registry/projects.md from disk, add/update the row, then:
+   scripts/ledger-commit.sh "registry: onboard <slug>" registry/projects.md
+   scripts/lock.sh release card-_index "$SHEPHERD_ID"
+   ```
+
+   Committing the project card under `card-_index` would be a silent corruption: `ledger-commit.sh` runs `git add` on every path it is given, so a triage context-note append to that same card — holding `card-<slug>`, exactly as it should — gets staged and committed half-written under your message.
 2. **Create the onboarding task** — title `Onboard <slug>`, size M, tier standard, branch `task/T-NNNN-onboard`, Brief from the template below. Commit; invoke dispatch (normal path, normal watchers).
 3. **Worker phase 1** (one turn): deep scan → writes its report INTO the task card (append `## Onboarding report`), drafts the project CLAUDE.md on the task branch, commits + pushes, ends `SHEPHERD: blocked — onboarding report and questions ready`.
-4. **Question relay** — on wake, read the report in the card. Relay the worker's numbered questions to the operator **verbatim** in chat (this is the one intake where human answers are the whole point — do not answer them yourself). Wait.
+4. **Question relay** — on wake, read the report in the card. Relay the worker's numbered questions to the operator **verbatim** in chat, all in one message (this is the one intake where human answers are the whole point — do not answer them yourself). Where the scan or registry suggests a likely answer, append `➡️ suggested:` under that question so the operator can confirm with one word or override — a suggestion is never banked as an answer without their confirmation. Wait.
 5. **Bank the answers** — registry card: `## Product` gets What/Why/How + the full Q&A; fields enriched (stack, test, dev-branch, keywords); `## Gotchas` gets scan findings. Seed the project's Claude auto-memory directory (`~/.claude/projects/<encoded-project-path>/memory/`) with durable product facts + MEMORY.md index lines. Log each answer-bank in the card.
 6. **Worker phase 2** — send the worker any answers that change its CLAUDE.md draft or report (single-line messages via adapter R4, or point it at the updated registry card). Worker finalizes, verifies DoD, ends `SHEPHERD: done`.
-7. **Close** — monitor verifies (CLAUDE.md commit on the branch, pushed), retro closes, and retro flips `onboarded: yes  # <date>` + index. The operator merges the small onboarding PR at leisure via their normal review flow; the registry is authoritative for shepherd either way.
+7. **Close** — monitor verifies (CLAUDE.md commit on the branch, pushed), retro closes, and retro flips `onboarded: yes  # <date>` on the card and the matching index row. Two files again, so the same two locks as step 1, each committing only its own path:
+
+   ```bash
+   scripts/lock.sh acquire "card-<slug>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
+   # re-read registry/projects/<slug>.md from disk, flip onboarded:, then:
+   scripts/ledger-commit.sh "registry: <slug> onboarded" registry/projects/<slug>.md
+   scripts/lock.sh release "card-<slug>" "$SHEPHERD_ID"
+
+   scripts/lock.sh acquire card-_index "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
+   # re-read registry/projects.md from disk, flip the row, then:
+   scripts/ledger-commit.sh "registry: <slug> onboarded (index)" registry/projects.md
+   scripts/lock.sh release card-_index "$SHEPHERD_ID"
+   ```
+
+   The operator merges the small onboarding PR at leisure via their normal review flow; the registry is authoritative for shepherd either way.
 
 ## Onboarding Brief template (goes in the card's `## Brief`)
 

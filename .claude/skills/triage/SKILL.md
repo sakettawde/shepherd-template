@@ -16,9 +16,18 @@ Question about state, history, a project, or a decision → answer from registry
 The operator is sharing knowledge (decisions, meeting notes, stakeholder conversations, priorities):
 
 1. Identify the project (ask if ambiguous).
-2. Append a dated entry to the registry card `## Context notes` (verbatim-ish, compressed).
-3. Distill durable facts into the project's Claude auto-memory directory (`~/.claude/projects/<encoded-project-path>/memory/`) (one-fact files + MEMORY.md index line).
-4. Commit, confirm in one line.
+2. Take the card lock, then append a dated entry to the registry card `## Context notes` (verbatim-ish, compressed):
+
+   ```bash
+   scripts/lock.sh acquire "card-<slug>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
+   # re-read registry/projects/<slug>.md from disk, edit, then:
+   scripts/ledger-commit.sh "<slug>: context note" "registry/projects/<slug>.md"
+   scripts/lock.sh release "card-<slug>" "$SHEPHERD_ID"
+   ```
+
+   Re-read inside the lock and commit inside the lock. Your in-context copy may be minutes stale, and a commit after release can capture another instance's half-written edit to the same file.
+3. Distill durable facts into the project's Claude auto-memory directory (`~/.claude/projects/<encoded-project-path>/memory/`) (one-fact files + MEMORY.md index line). Individual fact files need no lock; the shepherd `MEMORY.md` index takes `card-_memory` under the same protocol.
+4. Confirm in one line.
 
 ## 3. Clarifying question
 
@@ -29,27 +38,36 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
 ## 4. Task
 
 1. **Route** via `registry/projects.md` keywords + card contents. If the project is **not `onboarded: yes`** → refuse the task in one line and offer onboarding (which is itself a task — see the onboard skill). Never brief a worker into a non-onboarded repo.
-2. **Number**: `T-NNNN` = max existing in `ledger/tasks/` + 1, zero-padded to 4.
+
+   If another instance already holds this project's lock and the operator wants a second lane, route to a **clone**: `project: <slug>~N`, path from the registry card's `## Clones` table. A clone is never onboarded again — it inherits the parent card's `onboarded:`, Product, Gotchas and History. Create it per the dispatch skill before briefing.
+2. **Number**: reserve the id — never compute `max + 1` yourself, another instance may be doing the same at this moment:
+
+   ```bash
+   scripts/reserve-task-id.sh reserve "$SHEPHERD_ID" "$HERDR_PANE_ID" "<your agent_session>"
+   ```
+
+   It prints `T-NNNN` and creates the card file holding a one-line reservation. Fill that file from `templates/task-card.md` in your very next action, and set `owner:` to your `SHEPHERD_ID`. A reservation left unfilled is safe — no other instance touches it while your pane is alive — but it is not a card until you fill it.
 3. **Size / tier / budget**:
 
    | | size | budget | tier |
    |---|---|---|---|
-   | one-file fix, config, small bug | S | 30m | standard (fable/high) |
+   | one-file fix, config, small bug | S | 30m | standard (opus/high) |
    | feature, multi-file bug, refactor | M | 120m | standard |
    | large feature, migration, cross-cutting | L | 240m | standard or heavy |
-   | novel architecture · security-sensitive · >1-day scope · retry after failure | any | — | **heavy** (fable/max) |
+   | novel architecture · security-sensitive · >1-day scope · retry after failure | any | — | **heavy** (opus/xhigh) |
 
 4. **Card** from `templates/task-card.md`, `state: queued`. Fill the Brief from the registry card (stack, test, dev-branch, gotchas, product pointers) — the worker should never rediscover what the registry already knows. Retry of a failed task → the Brief also points at the predecessor card's `## Handoff` section (and its Log) so the new worker starts from what's already ruled out.
 
    **Brief-writing principles** (adapted from mattpocock/skills AGENT-BRIEF):
    - **Behavioral, not procedural** — describe what the system should do after the work, current behavior vs desired behavior; the worker explores and plans itself (briefs, not plans — CLAUDE.md §6).
-   - **Fill `### Why`** — the intent behind the operator's ask and the working mode (quick-and-dirty vs long-term-thorough), so the worker inherits it and can judge unanticipated trade-offs; monitor judges diff proportionality against it.
+   - **Fill `### Why`** — the intent behind the operator's ask and the working mode (quick-and-dirty vs long-term-thorough), so the worker inherits it and can judge unanticipated trade-offs; monitor judges diff proportionality against it. You are the task's owner, not its dispatcher: the Why is what lets you and the worker judge scope-fit, not just DoD pass/fail.
    - **Durable over precise** — a card can sit queued for days behind other tasks. Name interfaces, types, commands, and behavioral contracts; never file paths or line numbers — they go stale between queueing and dispatch.
    - **DoD criteria independently checkable** — each line something shepherd can verify alone ("`<cmd>` passes", "route X returns Y"), never "works correctly".
    - **Fill `### Out of scope`** — the adjacent things the worker must not touch. This is the cheapest defense against gold-plating and over-scoped diffs (monitor's over-scoped verdict starts here).
    - **Bug tasks: repro-first DoD** — the Brief requires the worker to produce one command that goes red on the bug before fixing (test, curl, CLI invocation). That command goes into the DoD; monitor reruns it at verification. No repro command → the fix claim is unverifiable.
+   - **Cited validation, judged per card** (CLAUDE.md §2 rule 11) — the template's validation bullet is present by default. Delete it only when neither trigger can apply: no third party, no infrastructure you do not own, and no choice without a clear winner. When you keep it, name in `### Context` the specific vendors, APIs or consoles the worker will have to verify, so the mandate is concrete rather than generic.
 
    **Decomposing L work**: when a thought is too big for one worker session, split it into **tracer-bullet slices** — each a narrow but complete vertical path (schema→API→UI→test), independently demoable, sized to one fresh worker context — as separate cards queued FIFO with blockers first. Note cross-card dependencies in each Brief (`Depends on: T-XXXX`). One mechanical wide refactor (rename, retype) is the exception: expand → migrate in batches → contract, each batch its own card. Present the proposed split to the operator for approval before creating the cards.
-5. Commit (`T-NNNN: captured → queued`), then **invoke dispatch** if the project has no active task and the 3-worker cap has headroom; otherwise say "queued behind T-XXXX" and stop.
+5. Commit (`T-NNNN: captured → queued`) via `scripts/ledger-commit.sh`, then **invoke dispatch** if the working copy has no active task and the worker cap (CLAUDE.md §0) has headroom; otherwise say "queued behind T-XXXX" and stop.
 
 Triage decides *what and where*; dispatch decides *when and how*. Keep them separate.
