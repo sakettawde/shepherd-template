@@ -56,6 +56,7 @@ mishandles these turns. Treat `working` as a progress checkpoint, never as termi
 ## Invariants
 
 - Every path that leaves the task in briefed/working/blocked **ends with a background R5 wait armed**. Never leave an active task unwatched.
+- **Every wake ends with `scripts/self-recycle.sh decide`** (CLAUDE.md §8 context check) — after the watchers are armed and the commit is in. `recycle` → adapter R10 in the same turn; `hold` → one line to the operator.
 - Every state transition is committed (`T-NNNN: <from> → <to>`).
 - `unknown` agent status is never treated as success — inspect (R6) and classify from evidence.
 - **Retry ceiling** — two failed verification cycles on the same task (any mix of lying / over-scoped / DoD failure) → `state: failed`, escalate to the operator; any retry is a NEW task at **heavy** tier.

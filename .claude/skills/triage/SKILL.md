@@ -71,3 +71,5 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
 5. Commit (`T-NNNN: captured → queued`) via `scripts/ledger-commit.sh`, then **invoke dispatch** if the working copy has no active task and the worker cap (CLAUDE.md §0) has headroom; otherwise say "queued behind T-XXXX" and stop.
 
 Triage decides *what and where*; dispatch decides *when and how*. Keep them separate.
+
+When a triage ends with nothing dispatched (answer, context ingestion, question, or a card queued behind another), finish with `scripts/self-recycle.sh decide` (CLAUDE.md §8 context check) — an idle moment is the cheapest time to recycle.
