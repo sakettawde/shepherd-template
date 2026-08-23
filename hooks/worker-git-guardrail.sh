@@ -10,6 +10,28 @@
 # force pushes, pushes to protected branches, remote branch deletion, and
 # history/worktree destruction. Everything here is escalation-only per
 # shepherd's decision-authority table (CLAUDE.md §4).
+#
+# WHAT THIS IS NOT. Matching a shell command as a string is inherently leaky:
+# quoting, aliases, variables, `eval`, and a wrapper script all defeat it, and
+# Claude Code's own permissions doc says as much about the same technique —
+# "Attempting to constrain command arguments using Bash permission patterns is
+# considered fragile" (https://code.claude.com/docs/en/permissions). Treat this
+# hook as a speed bump against the destructive command a worker reaches for by
+# habit, not as a boundary. A worker that means to get past it can.
+#
+# It is also the *only* mechanical guard a worker session has. The `permissions
+# .deny` rules in this repo's `.claude/settings.json` are a second layer for
+# shepherd's own session, and Claude Code evaluates those with a shell-aware
+# parser rather than a grep — but they are project settings and do not travel
+# to a worker running in another repo. Give a project its own deny list at
+# onboarding where its workers warrant one.
+#
+# It costs something, too: the raw command string is what gets matched, so a
+# worker cannot run any Bash command that merely *mentions* a blocked pattern —
+# writing about `git push --force` in a heredoc blocks the heredoc. That is
+# fail-closed and deliberate. Route such text through a file edit instead.
+# `scripts/tests/test-guardrail.sh` is the probe; it keeps its fixtures in the
+# file for exactly this reason.
 
 [ -n "${SHEPHERD_TASK_ID:-}" ] || exit 0
 
@@ -20,6 +42,42 @@ INPUT=$(cat)
 COMMAND=$(printf '%s' "$INPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' 2>/dev/null) || COMMAND="$INPUT"
 
 [ -z "$COMMAND" ] && exit 0
+
+# --- normalise before matching ----------------------------------------------
+# Every pattern below anchors on the sequence `git <subcommand>`. Two things sit
+# between the two in real use and used to slip all of them: any whitespace, and
+# git's global options. `git -C <dir>` is the house style in this very repo, and
+# a worker in a clone works inside a git worktree — the situation that produces
+# it most naturally.
+
+# Whitespace first. A line continuation joins its two lines; a tab is a
+# separator to the shell and to git alike. A newline becomes `;`, never a space:
+# it separates two commands exactly like `;` `|` and `&` do, and the `[^|;&]*`
+# guards below depend on that. Collapsing it to a space would splice unrelated
+# commands together and block on a flag that belongs to neither.
+COMMAND=${COMMAND//$'\\\n'/ }
+COMMAND=${COMMAND//$'\t'/ }
+COMMAND=${COMMAND//$'\n'/;}
+
+# Then the global options: `git -C <dir> push …`, `git -c k=v push …`,
+# `git --git-dir=… push …`, `git --no-optional-locks push …` → `git push …`.
+# Strip them leftmost-first, one per pass. Rule A takes an option that consumes
+# a *separate* argument and removes both tokens; rule B takes any other option.
+# A must run before B in each pass, or B would eat `-C` alone and leave the
+# directory standing where the subcommand belongs — which reads as no match at
+# all. Every pass removes at least one token, so the loop terminates.
+#
+# Only the options whose value is a separate argument need naming. Git rejects
+# the attached forms (`git -C/repo` → "unknown option"), so the space is
+# guaranteed; the `--opt=value` forms are single tokens and rule B handles them.
+GIT_ARG_OPTS='-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--attr-source|--config-env'
+while :; do
+  NEXT=$(printf '%s' "$COMMAND" | sed -E "s/(^|[^[:alnum:]_-])git +($GIT_ARG_OPTS) +[^ ]+ +/\1git /g")
+  if [ "$NEXT" != "$COMMAND" ]; then COMMAND=$NEXT; continue; fi
+  NEXT=$(printf '%s' "$COMMAND" | sed -E 's/(^|[^[:alnum:]_-])git +-[^ ]+ +/\1git /g')
+  [ "$NEXT" = "$COMMAND" ] && break
+  COMMAND=$NEXT
+done
 
 # Protected integration branches; extend per project at onboarding if needed.
 PROTECTED='(main|master|dev|develop)'
