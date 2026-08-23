@@ -28,10 +28,10 @@ card T-0105 briefed
 card T-0106 review
 
 mklock project-alpha       shepherd-9 w6:p9 sess-9 T-0100 "$(date -Iseconds)"
-mklock project-beta     shepherd-9 w6:p9 sess-9 T-0101 "$(date -Iseconds)"
-mklock project-gamma  shepherd-9 w6:p9 sess-9 T-0102 "$(date -Iseconds)"
+mklock project-beta        shepherd-9 w6:p9 sess-9 T-0101 "$(date -Iseconds)"
+mklock project-gamma       shepherd-9 w6:p9 sess-9 T-0102 "$(date -Iseconds)"
 mklock project-captured    shepherd-9 w6:p9 sess-9 T-0103 "$(date -Iseconds)"
-mklock project-teacher     shepherd-9 w6:p9 sess-9 none   "$(date -Iseconds)"
+mklock project-taskless    shepherd-9 w6:p9 sess-9 none   "$(date -Iseconds)"
 mklock card-alpha          shepherd-9 w6:p9 sess-9 none   "$(date -Iseconds)"
 mklock dispatch            shepherd-9 w6:p9 sess-9 none   "$(date -Iseconds)"
 mklock shepherd-9          shepherd-9 w6:p9 sess-9 none   "$(date -Iseconds)"
@@ -68,7 +68,7 @@ assert_eq     "and is reported as an orphan" "$(printf '%s' "$out" | grep -c '^O
 assert_nofile "closed task frees its project lock"  "$L/project-beta.lock"
 assert_nofile "queued task frees its project lock"  "$L/project-gamma.lock"
 assert_nofile "captured task frees its project lock"  "$L/project-captured.lock"
-assert_nofile "taskless project lock is freed"      "$L/project-teacher.lock"
+assert_nofile "taskless project lock is freed"      "$L/project-taskless.lock"
 assert_nofile "stale card lock is freed"            "$L/card-alpha.lock"
 assert_nofile "stale dispatch lock is freed"        "$L/dispatch.lock"
 assert_nofile "stale identity lock is freed"        "$L/shepherd-9.lock"
