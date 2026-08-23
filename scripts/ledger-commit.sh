@@ -25,7 +25,16 @@ git_retry() {
     out=$(git -C "$SHEPHERD_ROOT" "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then printf '%s' "$out"; return 0; fi
     case $out in
-      *index.lock*|*"Another git process"*)
+      # Two contended resources, not one. The index lock is the familiar half.
+      # The other is the ref compare-and-swap: two instances that both read HEAD
+      # race on the update, and the loser is told "cannot lock ref 'HEAD': is at
+      # <sha> but expected <sha>". That message carries neither "index.lock" nor
+      # "Another git process", so it used to fall through to the catch-all below
+      # and the commit was dropped on the first collision - silently, because the
+      # caller sees only exit 1. Retrying is safe: a failed ref update means
+      # nothing landed on the branch, so the next attempt commits the same
+      # content on top of the winner. Measured on git 2.43.0.
+      *index.lock*|*"Another git process"*|*"cannot lock ref"*|*"Unable to create"*.lock\'*)
         sleep "1.$(( RANDOM % 9 ))"
         continue ;;
       *) printf '%s' "$out"; return "$rc" ;;
