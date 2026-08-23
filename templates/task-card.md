@@ -35,8 +35,9 @@ Project: <path>. Stack: <stack>. Dev branch: <dev-branch>. DoD command: `<cmd>`.
 - <bug tasks: a single repro command that went red on the bug and green after the fix — shepherd reruns it at verification>
 
 ### Status protocol
-End every pause and your final message with exactly one line:
-`SHEPHERD: done|blocked|failed — <one short line>`
+End every pause and your final message with exactly one line, on a line of its own:
+`SHEPHERD: done|blocked|failed|working — <one short line>`
+`working` is a mid-task progress checkpoint and is never terminal; the other three end the task.
 
 ## Log
 - <HH:MM> captured (<source thought, verbatim-ish>)

@@ -48,6 +48,13 @@ mklock project-review      shepherd-9 w6:p9 sess-9 T-0106 "$(date -Iseconds)"
 # gone, so removing the MALFORMED guard both loses the report and unlinks
 # the file - a lock nobody can account for, gone without a trace.
 printf '\n' > "$L/card-malformed.lock"
+# A SHORT line over a LIVE holder. `read` leaves session empty, shepherd_live
+# compares the live pane's session id against "" and answers gone, and sweep
+# unlinks the project lock of a running instance - the one failure the whole
+# multi-instance design exists to prevent, reported as a routine SWEPT line.
+# takeover, shepherd-identity acquire/touch and reserve-task-id sweep all
+# already refuse this input; sweep is the one that mass-deletes.
+printf 'shepherd-1 w6:p1\n' > "$L/project-live-truncated.lock"
 
 # the oracle pre-flight: with no override and no pane, sweep must do nothing
 before=$(ls "$L" | wc -l)
@@ -93,6 +100,9 @@ assert_eq     "and the review orphan is reported" \
 assert_file   "unparseable lock is left in place"   "$L/card-malformed.lock"
 assert_eq     "unparseable lock is reported MALFORMED" \
   "$(printf '%s' "$out" | grep -c '^MALFORMED card-malformed')" "1"
+assert_file   "short lock line over a LIVE holder is not deleted" "$L/project-live-truncated.lock"
+assert_eq     "short lock line is reported MALFORMED" \
+  "$(printf '%s' "$out" | grep -c '^MALFORMED project-live-truncated')" "1"
 assert_ok     "sweep exits 0"                        bash "$LOCK" sweep
 
 # --- the CHANGED re-verify. Sweep's liveness probe is a herdr round-trip;

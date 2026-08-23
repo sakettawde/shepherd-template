@@ -2,11 +2,14 @@
 
 Sync rule: **framework files are edited in shepherd-template first**, then pulled into instances (`git remote add template …`; cherry-pick). Instance-state files never cross in either direction — in a template-repo PR, a diff touching an instance-state path is a leak.
 
+Measure drift with `git log template/main..HEAD -- <framework paths>`; a `diff --stat` between two personalised trees reports the personalisation layer as drift (T-0101).
+
 | Path | Kind | Notes |
 |---|---|---|
 | `CLAUDE.md` | framework, except `## 0. Operator` | the Operator block is instance state written by init-shepherd; instances may also append local overrides at the end of §6 |
 | `.claude/skills/**` | framework | includes init-shepherd |
-| `.claude/settings.json` | framework | repo-scoped permissions |
+| `.claude/settings.json` | framework | repo-scoped permissions, incl. the `deny` block |
+| `.claude/settings.local.json` | instance state | per-machine permission overrides; gitignored, never synced — and never hand-copied into a new clone, where its pane ids and paths are stale |
 | `hooks/**` | framework | registered user-globally by init-shepherd |
 | `templates/**` | framework | task-card skeleton |
 | `scripts/**` | framework | bootstrap-registry.sh, lock.sh, reserve-task-id.sh, ledger-commit.sh, shepherd-identity.sh, self-recycle.sh, drill.sh, lib/, tests/ |

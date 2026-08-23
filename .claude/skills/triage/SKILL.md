@@ -55,6 +55,7 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
    | feature, multi-file bug, refactor | M | 120m | standard |
    | large feature, migration, cross-cutting | L | 240m | standard or heavy |
    | novel architecture · security-sensitive · >1-day scope · retry after failure | any | — | **heavy** (opus/xhigh) |
+   | greenfield **and** a live integration **and** a full SDD chain | **L** | 240m | **heavy** — never an M (T-0093: budgeted 120m as an M, raised twice, ran 264m) |
 
 4. **Card** from `templates/task-card.md`, `state: queued`. Fill the Brief from the registry card (stack, test, dev-branch, gotchas, product pointers) — the worker should never rediscover what the registry already knows. Retry of a failed task → the Brief also points at the predecessor card's `## Handoff` section (and its Log) so the new worker starts from what's already ruled out.
 

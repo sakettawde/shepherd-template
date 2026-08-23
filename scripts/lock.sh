@@ -162,6 +162,17 @@ cmd_sweep() {
       continue
     fi
     read -r holder pane session task ts <<<"$line"
+    # A line that parses but is SHORT is not a gone holder. With session
+    # empty, shepherd_live compares the live pane's session id against ""
+    # and returns 1 (gone) - so sweep would unlink the project lock of a
+    # running instance and report it as a routine SWEPT. takeover,
+    # shepherd-identity acquire/touch and reserve-task-id sweep all guard
+    # this input already; sweep is the only mass-deleting command, so it
+    # needs the guard most.
+    if [ -z "$holder" ] || [ -z "$pane" ] || [ -z "$session" ]; then
+      echo "MALFORMED $base - left in place, inspect by hand"
+      continue
+    fi
 
     shepherd_live "$pane" "$session"
     live_rc=$?

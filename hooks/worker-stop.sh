@@ -29,7 +29,13 @@ if data.get("agent_id") or data.get("hook_event_name") == "SubagentStop":
     raise SystemExit(0)
 
 msg = data.get("last_assistant_message") or ""
-claims = re.findall(r"SHEPHERD:\s*(done|blocked|failed)", msg)
+# The sentinel is a LINE, and only the last one counts. Matching anywhere in
+# the message records a claim from a worker that merely wrote *about* one
+# (T-0093: a turn discussing a failed card was recorded "claim": "failed"
+# while its own tail ended `SHEPHERD: working`). `working` is admitted as a
+# non-terminal progress checkpoint - the R5 watcher greps only for
+# done|blocked|failed, so it never wakes shepherd.
+claims = re.findall(r"(?m)^\s*(?:\*\*)?SHEPHERD:\s*(done|blocked|failed|working)\b", msg)
 
 line = {
     "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

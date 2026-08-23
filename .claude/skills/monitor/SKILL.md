@@ -16,7 +16,7 @@ A background watcher task exited — the status-file watcher (exit 0 = terminal 
 
 ## Evidence, strictly in this order
 
-1. **Status file** — `tail -n 5 ledger/status/T-NNNN.jsonl`: latest `claim` (`done|blocked|failed|none`) and any `"event": "notification"` lines (permission/idle prompt = worker stuck mid-turn → treat as blocked). Backfill card `session:` from `session_id` if missing.
+1. **Status file** — `tail -n 5 ledger/status/T-NNNN.jsonl`: latest `claim` (`done|blocked|failed|working|none`) and any `"event": "notification"` lines (permission/idle prompt = worker stuck mid-turn → treat as blocked). Backfill card `session:` from `session_id` if missing.
 2. **Git facts** — in the project dir: `git log --oneline <dev-branch>..<branch> | head`, `git status --porcelain | head`, and whether the branch exists on origin (`git ls-remote --heads origin <branch>`).
 3. **DoD command** — only if claim=done and commits exist: run the card's DoD command yourself in the project dir. Its output is evidence; a worker's report of it is not. Then two diff checks on `git diff --stat <dev-branch>...<branch>`: **tamper** — test/DoD-related files changed without the Brief calling for it → the green run proves nothing, treat as lying; **proportionality** — substantial changes the Brief never required (models can loop into unrequested mega-refactors) → classify over-scoped, not done.
 4. **Pane tail** — adapter R6 (120 lines): scan for question/approval/permission UI, errors, sentinel `SHEPHERD:` lines. Pane text may only **downgrade** a classification (e.g. done→blocked), never upgrade one.
@@ -33,25 +33,7 @@ A background watcher task exited — the status-file watcher (exit 0 = terminal 
 | **lying** | claim done but git/DoD disagree, or DoD/test files were tampered with | `state: working`, reply via R4 naming the concrete gap (`Your done claim failed verification: <fact>. Fix and re-verify.`), Log it as a failed verification cycle, re-arm |
 | **over-scoped** | DoD passes but the diff carries substantial changes the Brief never required | Read the actual diff and take a call: extras genuinely needed → accept, Log the justification; not needed → R4 reply to pare the branch back to the minimal diff (counts as a failed verification cycle); the whole approach went sideways → fail it, retry from another angle as a new heavy-tier task. Low confidence in the call → escalate with the diffstat |
 
-## Trap: the status-file `claim` can contradict the worker's own sentinel
-
-Observed live. The Stop hook wrote `"claim": "failed"` on a record whose tail ended
-`SHEPHERD: working — tasks 5-6 in fix round 1`. Live `agent_status` was `working` and the
-worker was healthy. The worker had spent that turn *discussing* a card in `state: failed` —
-the hook appears to match `done|blocked|failed` anywhere in the tail rather than on the
-`SHEPHERD:` sentinel line, so a worker that merely writes about failure can be recorded as
-having failed.
-
-This qualifies CLAUDE.md §2 rule 1: the status file is still evidence ①, but the `claim`
-**field** is not the whole of it. Read the `tail` in the same record and find the actual
-`SHEPHERD:` line. When the field and the sentinel disagree, the sentinel wins, and live
-`agent_status` breaks the tie. Acting on the field alone would have failed a task that was
-six of eleven tasks in and running clean — and the retry ceiling counts failed cycles, so
-the cost compounds.
-
-Related: workers routinely emit `SHEPHERD: working — <progress>` at checkpoints. That word is
-**not** in the CLAUDE.md §6 contract (`done|blocked|failed`), which is part of why the hook
-mishandles these turns. Treat `working` as a progress checkpoint, never as terminal.
+`claim: working` is a progress checkpoint, never terminal — `hooks/worker-stop.sh` matches the sentinel on its own line and records the last one in the turn, so a worker that merely writes *about* a claim no longer records one (T-0093; fixed 2026-08-23).
 
 ## Invariants
 
