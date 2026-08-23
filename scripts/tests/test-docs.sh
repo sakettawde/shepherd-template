@@ -57,4 +57,20 @@ dangling=$(grep -oE '[Pp]recondition[s]? item [0-9]+|precondition [0-9]+' \
            | grep -oE '[0-9]+' | awk -v n="$last" '$1 < 1 || $1 > n')
 assert_eq "no Steps line points at a precondition that does not exist" "$dangling" ""
 
+# --- the ledger checkout never leaves main (F5) -----------------------------
+# The guard in ledger-commit.sh is the mechanism; these two sentences are the
+# reason a reader needs before the refusal makes sense.
+assert_ok "FRAMEWORK.md sends framework changes to a separate checkout" \
+  grep -q 'separate `shepherd-template` checkout' "$ROOT/FRAMEWORK.md"
+assert_ok "FRAMEWORK.md says the instance may never leave main" \
+  grep -q 'may never leave `main`' "$ROOT/FRAMEWORK.md"
+
+# --- one spelling for the self-repo slug ------------------------------------
+# `shepherd (self)` matches neither the S5 greps nor the lock name, so cards
+# spelled that way are invisible to dispatch and retro.
+assert_ok "CLAUDE.md names the self-repo slug" \
+  grep -q '`project: shepherd`' "$ROOT/CLAUDE.md"
+assert_ok "CLAUDE.md retires the 'shepherd (self)' spelling" \
+  grep -q 'spelling is retired' "$ROOT/CLAUDE.md"
+
 finish
