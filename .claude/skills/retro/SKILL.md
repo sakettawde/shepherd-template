@@ -22,9 +22,12 @@ description: Close out a task after monitor verified it done (or declared it fai
    ```bash
    scripts/lock.sh acquire "card-<slug>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>"
    # re-read registry/projects/<slug>.md from disk, edit, then:
-   scripts/ledger-commit.sh "T-NNNN: review → done|failed" registry/projects/<slug>.md ledger/tasks/T-NNNN.md
+   scripts/ledger-commit.sh "T-NNNN: review → done|failed" \
+     registry/projects/<slug>.md ledger/tasks/T-NNNN.md ledger/status/T-NNNN*.jsonl
    scripts/lock.sh release "card-<slug>" "$SHEPHERD_ID"
    ```
+
+   The status JSONL rides along because no other step commits it, and it is evidence ① (CLAUDE.md §2 rule 1) — without this the close-out lands in git while the record that justified it does not. `ledger-commit.sh` treats "nothing to commit" as success, so the extra path is safe when the file is unchanged.
 
    Then release the project lock:
 
