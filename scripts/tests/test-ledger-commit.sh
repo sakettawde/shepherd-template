@@ -131,4 +131,41 @@ assert_ok "and the same commit succeeds on main" \
 assert_eq "the card really landed on main" \
   "$(git -C "$SHEPHERD_ROOT" log --oneline main -- ledger/tasks/T-0300.md | wc -l)" "1"
 
+# --- the ref-lock race is retryable too. Two instances committing at the same
+# moment both read HEAD; the loser's ref update fails its compare-and-swap with
+# "cannot lock ref 'HEAD': is at <sha> but expected <sha>". That message carries
+# neither "index.lock" nor "Another git process", so the retry loop used to fall
+# through to its catch-all and drop the commit on the first collision - measured
+# live: `bash scripts/tests/run.sh` failed the five-way parallel assertion in
+# 1 run of 5, and the same rate on main before this port. git is stubbed to lose
+# the race twice and then succeed, so the assertion is deterministic.
+refstub="$SHEPHERD_ROOT/refstub"; mkdir -p "$refstub"
+cat > "$refstub/git" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+  case $a in
+    rev-parse) echo main; exit 0 ;;
+    add)    exit 0 ;;
+    commit)
+      n=$(cat "$REFRACE_COUNT" 2>/dev/null); n=${n:-0}
+      if [ "$n" -lt 2 ]; then
+        echo $((n + 1)) > "$REFRACE_COUNT"
+        echo "fatal: cannot lock ref 'HEAD': is at 4b59717 but expected be93a90"
+        exit 128
+      fi
+      echo "[main abc1234] stubbed"; exit 0 ;;
+  esac
+done
+exit 0
+STUB
+printf '#!/bin/sh\nexit 0\n' > "$refstub/sleep"
+chmod +x "$refstub/git" "$refstub/sleep"
+REFRACE_COUNT="$SHEPHERD_ROOT/refrace.count"; echo 0 > "$REFRACE_COUNT"
+export REFRACE_COUNT
+out=$( PATH="$refstub:$PATH" bash "$C" "T-0302: ref race" ledger/tasks/T-0302.md 2>&1 ); rc=$?
+assert_eq "a lost HEAD race is retried, not dropped" "$rc" "0"
+assert_eq "and it took the two retries the stub forced" "$(cat "$REFRACE_COUNT")" "2"
+assert_eq "no failure diagnostic was printed" \
+  "$(printf '%s' "$out" | grep -c 'ledger-commit: commit failed')" "0"
+
 finish
