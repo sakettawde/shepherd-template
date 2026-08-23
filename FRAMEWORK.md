@@ -9,11 +9,13 @@ Sync rule: **framework files are edited in shepherd-template first**, then pulle
 | `.claude/settings.json` | framework | repo-scoped permissions |
 | `hooks/**` | framework | registered user-globally by init-shepherd |
 | `templates/**` | framework | task-card skeleton |
-| `scripts/**` | framework | bootstrap-registry.sh |
+| `scripts/**` | framework | bootstrap-registry.sh, lock.sh, reserve-task-id.sh, ledger-commit.sh, shepherd-identity.sh, self-recycle.sh, drill.sh, lib/, tests/ |
 | `README.md`, `FRAMEWORK.md` | framework | |
 | `docs/herdr-schema-*.json` | framework | pin snapshots |
 | `docs/writing-for-agents.md` | framework | reference for skills/CLAUDE.md authoring (onboard, retro) |
+| `docs/specs/multi-shepherd-design.md` | framework | the concurrency design CLAUDE.md §8 cites (§6.1 lock kinds, §9 session start) |
 | `ledger/**` | instance state | task cards, status JSONLs, attachments |
+| `ledger/locks/**`, `ledger/shepherds/**` | instance state | runtime coordination; gitignored, never synced |
 | `registry/**` | instance state | project index + cards |
 | `decisions/**` | instance state | decision log |
 | `docs/**` (everything else) | instance state | specs, plans, drills, ideas |
