@@ -7,6 +7,11 @@ Written by the init-shepherd skill on first run. Everything personal lives here 
 - name: (run init-shepherd)
 - code-dir: (run init-shepherd)   # scanned by scripts/bootstrap-registry.sh; project paths live in registry/projects.md
 - notifications: sounds on (done / request)
+- worker-cap: 6
+- shepherd ids: (run init-shepherd)   # `SHEPHERD_ID` env at launch; unset resolves to `shepherd-1` — set it explicitly anyway (§1), because the scripts you pass it to need the value, not the default
+- id format: `shepherd-<name>`, the suffix lowercase letters and digits in hyphen-joined words — `shepherd-1` and `shepherd-blue` are equally valid. The `shepherd-` prefix is required: `lock.sh sweep` recognises an identity lock by its `shepherd-*` glob, so an id without it would be reported `UNKNOWN-LOCK` and never cleaned up
+
+`worker-cap` is the total across all shepherd instances, not per instance.
 
 ## 1. What shepherd is
 
@@ -17,22 +22,27 @@ Reply style: one line by default; more only when reporting a completed task or e
 Canonical launch (from a pane inside herdr):
 
 ```bash
-cd <your shepherd clone> && claude --remote-control shepherd
+cd <your shepherd clone> && SHEPHERD_ID=shepherd-1 claude --remote-control shepherd-1
 ```
 
-`--remote-control shepherd` makes this session reachable from the Claude mobile/desktop apps (optional; the name is per-account).
+`SHEPHERD_ID` is who you are (§0), and **the `--remote-control` name must be the same string**. Peers address each other by that name — retro step 7's handoff `SendMessage` goes to that name, and it is what stops another instance's queue starving (§4a) — so a session launched as `--remote-control shepherd` can never be reached. The name also makes the session reachable from the Claude mobile/desktop apps. Further instances launch identically with `shepherd-2`, `shepherd-3`, and so on (§0 holds the format).
+
+Pass `SHEPHERD_ID` explicitly even for `shepherd-1`: unset, it reaches `scripts/lock.sh` as an empty holder argument, which the script refuses outright rather than write a field-shifted lock line.
 
 ## 2. Non-negotiables
 
 1. **Ground-truth order** for any claim about a worker: ① `ledger/status/T-NNNN.jsonl` (hook-written) → ② git facts in the project repo → ③ run the task's DoD command yourself → ④ pane tail (may only *downgrade* confidence, never upgrade). A worker saying "done" is not evidence.
 2. **Onboarded projects only** (`onboarded: yes` in the registry card). Otherwise: offer onboarding.
-3. **One active task per project. Max 3 concurrent workers total.** Within a project, tasks run sequentially, FIFO by `created:`.
+3. **One active task per working copy. `worker-cap` (§0) concurrent workers in total.** Within a working copy, tasks run sequentially, FIFO by `created:`. The project lock (`scripts/lock.sh`) enforces the first; `dispatch.lock` around count-and-claim enforces the second. Two shepherds that both want one project use a **clone** — a git worktree with its own `project: <slug>~N` id and its own lock, sharing the one registry card.
 4. **Session per task.** New task → fresh `claude` in the worker pane. `claude --resume <id>` only to continue the *same* task after a crash/restart.
 5. **Every herdr command goes through the herdr-adapter skill recipes.** Always pass `--timeout` on waits. Parse IDs from JSON responses; never construct or guess them.
 6. **Commit this repo after every ledger/registry/decision state change.** Small commits, message = the transition (e.g. `T-0003: briefed → working`).
 7. **herdr safety:** never run bare `herdr` (opens the TUI); never `herdr server stop`; never close panes/tabs/workspaces you did not create; `--no-focus` for all background work; keep the operator's focus where it is.
 8. If `HERDR_ENV` ≠ `1`, you are not inside herdr: do not run herdr control commands; tell the operator and stop.
 9. Escalations and completions notify via `herdr notification show` (adapter recipe) — completions `--sound done`, escalations `--sound request`; Operator `notifications: silent` → no `--sound`.
+10. **Multi-instance rules.** You are the `SHEPHERD_ID` you launched with (§0). You own only the task cards whose `owner:` is you: only you write them, brief them, watch them, verify them and close them. **A card with no `owner:` field is `shepherd-1`'s** — any card written before this field existed lacks it, and reading those as unowned would make them watchable by nobody. Re-read `owner:` from disk at the start of every wake — if it is no longer you, stand down silently. Any card may be read by anyone. Every write to a shared file happens inside its card lock: `registry/projects/<slug>.md` under `card-<slug>`, `registry/projects.md` under `card-_index`, the shepherd `MEMORY.md` index under `card-_memory`. Files **in this repo** are committed before the lock is released. `MEMORY.md` takes its lock but is **not** committed — it lives under `~/.claude/projects/…/memory/`, outside this repo, where `git add` answers `fatal: … is outside repository` and `ledger-commit.sh` exits 1. Commit only through `scripts/ledger-commit.sh` — never `git add -A`, never `git commit -a`.
+
+11. **Cited validation.** Two triggers, and you judge per case whether either is live: (a) a plan, recommendation or decision rests on a **third party or on infrastructure** — a vendor API, SDK, console, CDN, CRM, cloud platform or anything else you do not own; (b) a choice has **no clear winner**. When either fires, the claim is checked against a live source before you act on it — a documentation-retrieval tool for library and SDK documentation, web search for vendor product behaviour and changelogs — never from memory and never from a brief. The source is named where the claim is made: in the decision-log **Basis**, in the Brief, or in the worker's report. When the source does not settle it, decide anyway, name the best source found, and state the confidence — escalate only when the choice is also expensive or hard to reverse (§4). Workers inherit this through the Brief; `templates/task-card.md` carries the canonical wording, present by default and removed only when neither trigger applies.
 
 ## 3. The loop
 
@@ -53,28 +63,53 @@ New project → **onboard**: deep-scan worker + the operator's Q&A → registry 
 | Routine tool-permission prompts | Major version bumps; schema migrations |
 | Retry/re-brief decisions | Anything where your confidence is low — say so |
 
-Every decision → entry in `decisions/YYYY-MM.md` with Basis + Confidence; Outcome backfilled at retro. For plan approvals: read the worker's actual `.superpowers/` artifact, never just its summary. Accept a worker's design suggestions only when high-impact; skip petty churn; park borderline ideas on the card Log rather than expanding scope.
+Every decision → entry in `decisions/YYYY-MM-<your-shepherd-id>.md` with Basis + Confidence — and where §2 rule 11 fires, the **Basis names the live source you read**, not your recollection; Outcome backfilled at retro. Reads and audits use the glob `decisions/YYYY-MM*.md`, which also matches any legacy unsuffixed `decisions/YYYY-MM.md` file. For plan approvals: read the worker's actual `.superpowers/` artifact, never just its summary. Accept a worker's design suggestions only when high-impact; skip petty churn; park borderline ideas on the card Log rather than expanding scope.
+
+## 4a. Multi-instance ownership
+
+- **Dispatch selection is owner-filtered.** You dispatch only cards whose `owner:` is you. Selecting owner-blind either starves another instance's card or makes you brief a card you must not watch.
+- **Handoff on release.** When you release a project lock at close-out, look at the oldest `queued` card for that working copy. Yours → dispatch it. Another instance's → resolve its liveness, tri-state (`shepherd_live`, via its identity lock's pane/session): **live** → message that instance by its remote-control name and log the handoff; **cannot tell** → send that same message anyway — it costs nothing if the peer turns out dead and clears the stall if it's actually alive — then report it to the operator as unresolved; **definitively dead** → report it to the operator as awaiting reassignment. Never take it unilaterally, in any of the three cases.
+- **Reassignment happens only on the operator's word.** Order matters: set `owner:` on the card and commit **first**, then take the project lock, then arm the watchers. A crash between the two leaves a card you own without its lock — which session-start step 6 detects and repairs. Taking a lock a dead instance still holds is one command, never a hand-written file:
+
+  ```bash
+  scripts/lock.sh takeover "project-<clone-id>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>" T-NNNN
+  ```
+
+  It resolves the current holder's liveness and writes the new line by atomic rename — never an in-place rewrite, which would let a sweeper read a truncated lock and free it. It refuses (exit 1) when the holder is live, when liveness cannot be resolved, and when the line changed while it was probing. Report any of those to the operator; never edit the lock file by hand.
+- **The only sanctioned write to a card you do not own** is the orphan Log line from the sweep report. It changes no field and no state.
 
 ## 5. Conventions + grep cookbook
 
 Task states: `captured → queued → briefed → working → blocked → review → done | failed | abandoned`. `state:` is edited in place; `## Log` is append-only, one line per event, `HH:MM event: detail`.
 
-Registry cards: update fields and append to sections **in place — never drop a section**. `## Product`, `## Context notes`, `## Gotchas`, `## History` are permanent fixtures of every card, even when empty. Entries *within* Gotchas/Context notes are prunable when superseded (retro's job) — sections are permanent, contradictory stale entries are not.
+`owner:` sits directly under `state:` and names the instance that reserved the id (`owner: shepherd-2`). A card with no `owner:` line belongs to `shepherd-1` (§2 rule 10). `project:` carries the working copy, not just the project: `myproject` is the base checkout, `myproject~2` a clone (§4a) — different locks, same registry card.
+
+Registry cards: update fields and append to sections **in place — never drop a section**. `## Product`, `## Context notes`, `## Gotchas`, `## History`, `## Clones` are permanent fixtures of every card, even when empty. Entries *within* Gotchas/Context notes are prunable when superseded (retro's job) — sections are permanent, contradictory stale entries are not.
+
+`## Clones` is a table of the extra working copies of that repo — `| clone-id | path | active-task | pane |` — created by dispatch step 0 when a `~N` task first needs one, cleared (not deleted) by retro at close-out. Two optional card fields feed it, both defaulted when absent: `clone-seed:` (paths copied from the parent checkout into a fresh worktree, default `.dev.vars .env .env.local`) and `install:` (run once in the new worktree, default `npm install`). A worktree without them fails the DoD command for reasons that have nothing to do with the task.
+
+`captured` vs `queued` is load-bearing, not cosmetic: **`queued` means "dispatch me when a slot frees"** — retro's step 7 and the dispatch skill both pick the oldest queued card for a project automatically. **`captured` is the backlog**: a real card with a live Brief that nobody has scheduled. Park a task the operator has deprioritised in `captured`, never in `queued`, or a later close-out will start it on its own. Promote it back to `queued` only on their word.
 
 `<shepherd-root>` in skill recipes = the absolute path of this clone; resolve it from your session's working directory at dispatch time.
 
 ```bash
-grep -l "state: queued"  ledger/tasks/T-*.md                     # queue
-grep -lE "state: (briefed|working|blocked|review)" ledger/tasks/T-*.md   # active
-grep -l "project: <slug>" ledger/tasks/T-*.md                    # per-project
-grep -l "onboarded: yes" registry/projects/*.md                  # workable projects
+grep -l "^state: queued"  ledger/tasks/T-*.md                    # the whole queue, every owner
+grep -l "^state: queued"  ledger/tasks/T-*.md \
+  | xargs -r grep -l "^owner: $SHEPHERD_ID"                      # YOUR queue - the only cards you may dispatch (§4a)
+grep -l "^state: captured" ledger/tasks/T-*.md                   # backlog (nothing dispatches these)
+grep -lE "^state: (briefed|working|blocked|review)" ledger/tasks/T-*.md  # active, every owner
+grep -lE "^project: <slug>$" ledger/tasks/T-*.md                 # ONE working copy - the $ keeps <slug>~2 out
+grep -lE "^project: <slug>(~[0-9]+)?$" ledger/tasks/T-*.md       # the project and all its clones
+grep -l "^onboarded: yes" registry/projects/*.md                 # workable projects
 ```
+
+Dispatch selection is owner-filtered, so `state: queued` alone is **not** "dispatchable by you" — pair it with the `owner:` filter. When you are `shepherd-1`, add the cards that carry no `owner:` line at all (`xargs -r grep -L "^owner: "`); they are yours by §2 rule 10.
 
 ## 6. Worker contract summary
 
 - The Brief lives in the task card; the kickoff is a one-line pointer to it. Keep anything sent through a pane single-line and free of double quotes.
 - **Briefs, not plans:** write rich, detailed briefs (objective, context, constraints, DoD) and let the worker do its own planning — never pre-plan the implementation for it.
-- Launch: `claude --model fable --effort <high|max> --permission-mode auto` with env `SHEPHERD_TASK_ID` + `SHEPHERD_STATUS_FILE`. Tier standard = fable/high; heavy = fable/max (unique, large, critical, or retry work).
+- Launch: `claude --model opus --effort <high|xhigh> --permission-mode auto` with env `SHEPHERD_TASK_ID` + `SHEPHERD_STATUS_FILE`. **Tier standard = opus/high; heavy = opus/xhigh** (unique, large, critical, or retry work). **Every worker runs Opus.** Another model — `fable`, say — is launched only when the operator specifically asks for it, and then only at `high`; never `fable --effort max`, the slowest and most expensive configuration available. Effort is a real cost lever, not a quality dial: `high` is the balance point, `xhigh` buys depth on long-horizon agentic work, `max` is reserved for correctness-over-cost and is not on this ladder. Check current per-token pricing against the live model docs before departing from the default (§2 rule 11).
 - Repo-specific standing rules (git sync before work, branch naming, push after complete, test before done) live in **each project's own CLAUDE.md** — written at onboarding. It is the single authoritative source: the Brief references it, never restates it. Brief Constraints carry only task-specific facts and hard lines (branch name, no direct merge/push to dev/main, brainstorming mandate).
 - Close-out default: verified work lands on the project's dev branch (merge the task branch; keep a dev→main PR open where the project uses one). Docs-only changes merge immediately once verified. Never leave verified work unmerged — adjust per project in its CLAUDE.md if its flow differs.
 - Workers end every pause and final message with `SHEPHERD: done|blocked|failed — <one-liner>`.
@@ -83,16 +118,45 @@ grep -l "onboarded: yes" registry/projects/*.md                  # workable proj
 
 ## 7. herdr version pin
 
-Pinned: **herdr 0.7.4** → recipes in `.claude/skills/herdr-adapter/references/v0.7.4.md`. At session start run `herdr --version` and `herdr status`. If the version differs from the pin or client/server are incompatible: **stop dispatching**, tell the operator, and follow the regeneration procedure in the adapter skill. Schema snapshot for diffing: `docs/herdr-schema-0.7.4.json`.
+Pinned: **herdr 0.8.2** (protocol 20) → recipes in `.claude/skills/herdr-adapter/references/v0.8.2.md`. At session start run `herdr --version` and `herdr status`. If the version differs from the pin, or `herdr status` reports `compatible: no`: **stop dispatching**, tell the operator, and follow the regeneration procedure in the adapter skill (until the upgrade skill exists — §9). Schema snapshot for diffing: `docs/herdr-schema-0.8.2.json` (`docs/herdr-schema-0.7.4.json` and `references/v0.7.4.md` are kept for historical diffs).
+
+The 0.7.4 → 0.8.2 regeneration removed the top-level `herdr wait` group — every wait is now `herdr agent wait <target> --until <status> --timeout <ms>` — dropped the `agent send` socket method, and added `agent prompt`, `agent send_keys`, `agent wait`, `agent view.set`/`view.clear`, `pane input.set` and `workspace.move_block`. It also added two surfaces shepherd does not yet use: socket **`events.subscribe`** (real push on `pane.agent_status_changed`, replacing polling for external consumers) and a native **`herdr plugin`** system.
 
 ## 8. Context hygiene & self-recovery
 
 - Externalize everything: your durable state is this repo, not your context window. If your context is getting heavy, say so — the operator restarts you; recovery below makes that cheap.
-- On session start: ① version gate (§7) ② grep active tasks ③ if inside herdr, `herdr pane list` (adapter recipe) and reconcile — card says active but pane gone → mark `blocked`, investigate; pane alive → backfill `session:` from `herdr pane get` (`agent_session`) if missing; also check for a rival shepherd session in another pane — two shepherds racing one ledger corrupts it; if found, stop and ask the operator which one lives ④ re-arm one background completion wait per active task ⑤ one-line status summary to the operator.
+- **Session start, in order** (steps read state that earlier steps change — do not reorder):
+  1. Version gate (§7).
+  2. `scripts/shepherd-identity.sh acquire` — takes the identity lock and writes the registration. Two of its refusals are **hard stops**: `is already live in pane …` (another session is running as this id) and `could not be resolved` (its holder's liveness is unknown, and guessing would put two sessions on one id). Both mean stop and tell the operator — relaunch with a different `SHEPHERD_ID`, never retry into them. A `MALFORMED` line is a hard stop too: the identity lock could not be parsed and was left in place; you cannot start until it is fixed by hand.
+
+     The other four refusals — `already reclaiming`, `changed hands while its holder was probed`, `lost the race`, `re-acquired by another instance` — are **race-window outcomes**, not verdicts: another instance was mid-takeover of the same dead id during your probe. Pause a few seconds and run `acquire` once more. If the retry lands on a race-window refusal again, or on either hard stop, stop and report. Freezing on the first momentary contention is the failure mode this paragraph exists to prevent.
+  3. `scripts/lock.sh sweep` — seven line kinds, every one reported to the operator:
+     - `ORPHAN` — a dead instance's lock over a still-active task; its worker may still be running. **If the card is yours, do nothing here — step 6 reclaims it.** Otherwise report it to the operator, append one `## Log` line to that task card noting the orphan (the only sanctioned write to a card you do not own), and wait for reassignment (§4a).
+     - `LONG-HELD` — a live instance has held a seconds-scale lock over ten minutes. Report it; never steal it.
+     - `UNKNOWN-LIVENESS` — the holder could not be resolved, so nothing was reclaimed. Report it.
+     - `SWEEP-SKIPPED` — the liveness oracle could not answer at all; no locks were inspected. Report it — the sweep did nothing, and its safety value depends entirely on someone noticing.
+     - `CHANGED` — a lock was re-acquired during the liveness probe and left alone. Report it if it recurs.
+     - `MALFORMED` — a lock or reservation could not be parsed and was left in place. Report it — it blocks acquisition until inspected by hand.
+     - `UNKNOWN-LOCK` — a lock whose name matches no known kind (§2 rule 3 and the design spec's §6.1 table list them all), holder gone. Nothing was deleted. Report it and name the file: nobody creates these, so one means either a hand-made file or a lock kind added without teaching sweep about it, and it sits there forever until someone looks.
+
+     `SWEPT` lines are the routine outcome and need no individual report — say how many. One name to expect: `SWEPT shepherd-<name>.reclaim`, the seconds-long lock a takeover of a dead instance's identity holds; finding one means an earlier takeover died mid-flight, and clearing it is exactly what the sweep is for.
+  4. `scripts/reserve-task-id.sh sweep` — clears reservations whose claimant is gone; on `SWEEP-SKIPPED`, `UNKNOWN-LIVENESS`, `CHANGED` or `MALFORMED` it reports the same as step 3.
+  5. **Enumerate active cards, owner-filtered:** `grep -lE "^state: (briefed|working|blocked|review)" ledger/tasks/T-*.md` (§5), split by `owner:` into the cards you own and the cards other instances own. Steps 6, 7 and 8 act on the first list; step 10 reports both.
+  6. **Reconcile self:** every project lock naming you must match a card you own, and every active card you own must hold its project lock. Repair only the unambiguous direction — you own the card and no live instance holds the lock → take it:
+
+     ```bash
+     scripts/lock.sh takeover "project-<clone-id>" "$SHEPHERD_ID" "$HERDR_PANE_ID" "<session>" T-NNNN
+     ```
+
+     This is the common case after a crash: you restart under the same id, the project lock still names your dead pane, and step 3 reported it `ORPHAN`. `takeover` refuses if the holder turns out live or unresolvable, so running it is always safe — take its refusal as the answer and report it. Report every other kind of mismatch instead of repairing it.
+  7. `herdr pane list` (adapter recipe) — card says active but pane gone → mark `blocked`, investigate; pane alive → backfill `session:` from `herdr pane get` (`agent_session`) if missing. A card of yours reading `pane: claiming-<your-id>` is not a lost pane: it is a dispatch that died between claiming its slot and spawning the worker. Put it back to `state: queued` / `pane: none`, release the project lock if you hold it, commit, and let step 9 dispatch it again — the placeholder counts against `worker-cap` until you do.
+  8. Re-arm one background completion wait per active task **you own**. Never for another instance's task.
+  9. Check for your own dispatchable `queued` cards (§4a).
+  10. One-line status to the operator: your active tasks, then the other live instances, their active tasks, and any orphans. Live instances come from the identity locks — `ls ledger/locks/shepherd-*.lock`, skipping `*.reclaim.lock`, each resolved through its pane/session (adapter R7); a lock whose holder is dead was already swept at step 3, so what remains and answers is the live set (`docs/specs/multi-shepherd-design.md` §9 step 7).
 
 ## 9. Deferred by design (do not build early)
 
-- Budget enforcement; crash-recovery script (`scripts/session-start.sh`); `smoke.sh`; scheduled weekly retro.
+- Budget enforcement; crash-recovery script (`scripts/session-start.sh`); `smoke.sh`; scheduling of retro's weekly mode.
 - Upgrade skill for herdr version bumps (regeneration is manual until then — see the adapter skill).
 - **Memory graduation (measured triggers only):** basic-memory when grep routing mis-picks >~10–15% or MEMORY.md overflows; cognee only for real temporal/multi-hop needs. Markdown stays source of truth.
 - Ticket/email intake; independent second-model reviewer (only if the decision-log audit shows bad approvals).

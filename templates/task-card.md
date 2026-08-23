@@ -1,6 +1,7 @@
 # T-NNNN: <title>
 state: captured
-project: <slug>
+owner: <shepherd-id>
+project: <slug|slug~N for a clone working copy>
 size: <S|M|L>   tier: <standard|heavy>   budget: <30m|120m|240m>
 branch: task/T-NNNN-<short-slug>
 pane: none   session: none
@@ -22,10 +23,16 @@ Project: <path>. Stack: <stack>. Dev branch: <dev-branch>. DoD command: `<cmd>`.
 - Branch `task/T-NNNN-<short-slug>` off the latest `<dev-branch>`; never merge or push `<dev-branch>` or main directly.
 - This repository's own CLAUDE.md is the authoritative working agreement (git sync, tests, push discipline) — follow it.
 - ALWAYS start with the superpowers:brainstorming skill before touching code — every size, no exceptions. Then: S = test-driven-development; M/L = writing-plans → subagent-driven-development.
+- **Validate against live sources, and cite what you read** (CLAUDE.md §2 rule 11). Two triggers: (a) the work rests on a **third party or on infrastructure** you do not own — a vendor API, SDK, console, CDN, CRM or cloud platform; (b) you face a **choice with no clear winner**. When either fires, check it against a live source before building on it: a documentation-retrieval tool for library and SDK documentation, web search for vendor product behaviour and changelogs. Never from memory, and never from this card — a card can sit queued for days. Name the source next to the claim it supports. When the source does not settle it, decide anyway, name the best source you found, and state your confidence; end `SHEPHERD: blocked` only if the choice is also expensive or hard to reverse.
+  <shepherd: keep this bullet by default; delete it only when neither trigger can apply to this task>
+
+### Out of scope
+<what this task must NOT touch: adjacent features that look related but are separate, refactors not asked for. Kills gold-plating; delete the section only if truly nothing borders the work>
 
 ### Definition of Done
 - `<cmd>` passes.
 - Branch pushed to origin (preview deploy where configured).
+- <bug tasks: a single repro command that went red on the bug and green after the fix — shepherd reruns it at verification>
 
 ### Status protocol
 End every pause and your final message with exactly one line:
