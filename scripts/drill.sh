@@ -58,7 +58,9 @@ check "the first instance still holds the id" "$(awk '{print $2}' "$L/shepherd-1
 
 say "S12.4 commit under contention"
 G="$SANDBOX/git"; mkdir -p "$G/ledger/tasks"
-git -C "$G" init -q; git -C "$G" config user.email t@t; git -C "$G" config user.name T
+# -b main: git 2.43 still opens on master, and ledger-commit.sh refuses to
+# commit ledger state anywhere but main.
+git -C "$G" init -q -b main; git -C "$G" config user.email t@t; git -C "$G" config user.name T
 printf 'seed\n' > "$G/seed"; git -C "$G" add seed; git -C "$G" commit -qm seed
 ( export SHEPHERD_ROOT="$G"
   for i in 1 2 3 4 5; do printf 'x\n' > "$G/ledger/tasks/T-020$i.md"; done

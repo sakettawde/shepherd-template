@@ -7,7 +7,10 @@ C="$HERE/../ledger-commit.sh"
 
 echo "test-ledger-commit:"
 
-git -C "$SHEPHERD_ROOT" init -q
+# -b main, not a bare `git init`: git 2.43's default initial branch is still
+# master (git-init.adoc, read 2026-08-23), and ledger-commit refuses to commit
+# anywhere but main, so a master sandbox would fail every assertion below.
+git -C "$SHEPHERD_ROOT" init -q -b main
 git -C "$SHEPHERD_ROOT" config user.email t@t
 git -C "$SHEPHERD_ROOT" config user.name T
 printf 'seed\n' > "$SHEPHERD_ROOT/seed.md"
@@ -84,6 +87,7 @@ cat > "$stub/git" <<'STUB'
 #!/bin/sh
 for a in "$@"; do
   case $a in
+    rev-parse) echo main; exit 0 ;;
     add)    exit 0 ;;
     commit) echo "fatal: Unable to create '/repo/.git/index.lock': File exists."; exit 1 ;;
   esac
@@ -96,5 +100,35 @@ out=$( PATH="$stub:$PATH" bash "$C" "T-0201: contended" ledger/tasks/T-0201.md 2
 assert_eq "an exhausted retry budget exits 1" "$rc" "1"
 assert_eq "and says how many attempts were made, not just that it failed" \
   "$(printf '%s' "$out" | grep -c 'commit failed after 30 attempts')" "1"
+
+# --- the branch guard: this checkout is shared by every instance, so a task
+# branch checked out here would silently collect all of their ledger commits.
+# The guard must refuse BEFORE `git add`, so a refusal leaves the shared index
+# exactly as it found it (F5).
+git -C "$SHEPHERD_ROOT" checkout -q -b task/T-0112-guard
+printf 'on a task branch\n' > "$SHEPHERD_ROOT/ledger/tasks/T-0300.md"
+out=$(bash "$C" "T-0300: captured -> queued" ledger/tasks/T-0300.md 2>&1); rc=$?
+assert_eq "a commit off main exits 1" "$rc" "1"
+assert_eq "and names the branch it refused, and the one it expected" \
+  "$(printf '%s' "$out" | grep -c "refusing to commit ledger state on branch 'task/T-0112-guard' (expected main)")" "1"
+assert_eq "and says why, and what to do" \
+  "$(printf '%s' "$out" | grep -c "would land here too. Check out main first")" "1"
+assert_eq "the refused path was never staged" \
+  "$(git -C "$SHEPHERD_ROOT" diff --cached --name-only | grep -c 'T-0300.md')" "0"
+assert_eq "and nothing was committed" \
+  "$(git -C "$SHEPHERD_ROOT" log --oneline --all -- ledger/tasks/T-0300.md | wc -l)" "0"
+
+# fail-closed: a detached HEAD is not main either. `rev-parse --abbrev-ref`
+# answers HEAD for a detached head AND for an unborn branch (measured, git
+# 2.43.0), so both refuse.
+git -C "$SHEPHERD_ROOT" checkout -q --detach HEAD
+assert_fail "a commit on a detached HEAD is refused too" \
+  bash "$C" "T-0300: detached" ledger/tasks/T-0300.md
+
+git -C "$SHEPHERD_ROOT" checkout -q main
+assert_ok "and the same commit succeeds on main" \
+  bash "$C" "T-0300: captured -> queued" ledger/tasks/T-0300.md
+assert_eq "the card really landed on main" \
+  "$(git -C "$SHEPHERD_ROOT" log --oneline main -- ledger/tasks/T-0300.md | wc -l)" "1"
 
 finish
