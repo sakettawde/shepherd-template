@@ -73,4 +73,20 @@ assert_ok "CLAUDE.md names the self-repo slug" \
 assert_ok "CLAUDE.md retires the 'shepherd (self)' spelling" \
   grep -q 'spelling is retired' "$ROOT/CLAUDE.md"
 
+# --- §6 states the guardrail's strength honestly ----------------------------
+# The hook matches a shell command as a string, so quoting, variables, `eval`
+# and wrapper scripts all get past it. A manual that calls destructive git
+# "mechanically blocked" promises a boundary the hook does not provide, and a
+# shepherd who believes it stops verifying — which is the one thing §2 rule 1
+# exists to prevent. The hook's own header already says "speed bump"; §6 has to
+# say the same thing, or the two disagree about the same mechanism.
+assert_fail "CLAUDE.md does not call destructive git 'mechanically blocked'" \
+  grep -q 'mechanically blocked' "$ROOT/CLAUDE.md"
+assert_ok "the hook header frames itself as a speed bump" \
+  grep -q 'speed bump' "$ROOT/hooks/worker-git-guardrail.sh"
+assert_ok "CLAUDE.md uses the hook's own framing" \
+  grep -q 'speed bump' "$ROOT/CLAUDE.md"
+assert_ok "CLAUDE.md names the second layer that does not travel" \
+  grep -q 'permissions.deny' "$ROOT/CLAUDE.md"
+
 finish
