@@ -1,5 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "//": "The deny list is a speed bump plus a second layer, not a boundary. Claude Code's own docs warn that Bash permission patterns constraining command arguments are fragile - flag placement and variable use route around them (https://code.claude.com/docs/en/permissions, read 2026-08-23). Its value is that deny is evaluated before allow, so these rules also constrain the broad Bash(git:*) below, and that the matcher is shell-aware where a grep is not. The mechanical backstop for WORKER sessions is hooks/worker-git-guardrail.sh; this block is the only mechanical guard shepherd's own session has. The operations named here are the ones CLAUDE.md already forbids by instruction (S2 rule 10: never git add -A, never git commit -a) plus the destructive git of S4. One rule is deliberately exact rather than wildcarded: `Bash(git add .)` names the whole-tree add, because `Bash(git add .*)` also blocks every dot-prefixed path - `git add .claude/settings.json`, `git add .gitignore` - which is routine, safe work. Deny beats allow with no exceptions, so an over-broad rule here has no escape hatch.",
   "permissions": {
     "defaultMode": "default",
     "allow": [
@@ -7,6 +8,17 @@
       "Bash(git:*)",
       "Bash(grep:*)",
       "Bash(ls:*)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -f*)",
+      "Bash(git branch -D*)",
+      "Bash(git add -A*)",
+      "Bash(git add .)",
+      "Bash(git commit -a*)",
+      "Bash(git checkout .*)"
     ]
   }
 }
