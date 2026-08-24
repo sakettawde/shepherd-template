@@ -89,4 +89,35 @@ assert_ok "CLAUDE.md uses the hook's own framing" \
 assert_ok "CLAUDE.md names the second layer that does not travel" \
   grep -q 'permissions.deny' "$ROOT/CLAUDE.md"
 
+# --- parallelism metadata reaches its writer, its reader and the template ---
+# `touch-areas:` is written by triage onto every card; `parallel-safety:` is
+# triage's judgment and monitor's cue to re-run the DoD after a sibling merges.
+# A surface that never learned a field leaves it either unfilled or unread, and
+# an unread declaration is worse than no declaration: it reads as a check that
+# happened.
+for f in templates/task-card.md \
+         .claude/skills/triage/SKILL.md; do
+  assert_ok "touch-areas: is known to $f" grep -q 'touch-areas:' "$ROOT/$f"
+done
+for f in templates/task-card.md \
+         .claude/skills/triage/SKILL.md \
+         .claude/skills/monitor/SKILL.md; do
+  assert_ok "parallel-safety: is known to $f" grep -q 'parallel-safety:' "$ROOT/$f"
+done
+
+# One spelling each, for the reason working-agreement: has one. Scoped to the
+# framework surfaces rather than the whole tree: an instance's own task cards
+# are its state, nobody rewrites them, and a Brief may well use these words in
+# a sentence. The invariant that matters is that the writer, the readers and
+# the template agree — not that the words never appear in prose.
+FRAMEWORK_SURFACES=("$ROOT/templates" "$ROOT/.claude/skills" "$ROOT/scripts")
+
+tokens=$(grep -rhoiE 'touch[-_]areas:' \
+           --include='*.md' --include='*.sh' "${FRAMEWORK_SURFACES[@]}" 2>/dev/null | sort -u)
+assert_eq "one spelling of touch-areas, everywhere" "$tokens" "touch-areas:"
+
+tokens=$(grep -rhoiE 'parallel[-_]safe(ty)?:' \
+           --include='*.md' --include='*.sh' "${FRAMEWORK_SURFACES[@]}" 2>/dev/null | sort -u)
+assert_eq "one spelling of parallel-safety, everywhere" "$tokens" "parallel-safety:"
+
 finish

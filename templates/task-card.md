@@ -4,6 +4,8 @@ owner: <shepherd-id>
 project: <slug|slug~N for a clone working copy>
 size: <S|M|L>   tier: <standard|heavy>   budget: <30m|120m|240m>
 branch: task/T-NNNN-<short-slug>
+touch-areas: <what the work reaches, comma-separated: modules, schemas, config domains, shared interfaces — durable names, never file paths>
+parallel-safety: <independent|serialized> — <one line: the shared contract that decides it>
 pane: none   session: none
 created: <YYYY-MM-DDTHH:MM>
 
