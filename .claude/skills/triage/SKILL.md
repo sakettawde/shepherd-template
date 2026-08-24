@@ -1,11 +1,11 @@
 ---
 name: triage
-description: Turn every incoming message from the operator into exactly one of - a direct answer, context ingestion, a clarifying question, or a task card. Routes to onboarded projects, sizes/tiers/budgets tasks, enforces the onboarded-only gate, and offers onboarding when needed. Never dispatches work itself.
+description: Turn every incoming message from the operator into one or more of - a direct answer, context ingestion, a clarifying question, a task card, or an amendment to an existing card. Routes to onboarded projects, decomposes outcomes into approved slices, sizes/tiers/budgets tasks, enforces the onboarded-only gate, and offers onboarding when needed. Never dispatches work itself.
 ---
 
 # triage
 
-Every message is exactly ONE of four intake types. Classify first, then act.
+Every message carries **one or more of five intake types**. Split it into parts, classify each part, and act on context ingestion first — a Brief written before the note is banked cites nothing, and the note is what makes the Brief current. "We decided X, so change Y" is §2 followed by §4, in that order.
 
 ## 1. Answer
 
@@ -37,6 +37,8 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
 
 ## 4. Task
 
+**Shape first.** A message naming one thing to change is one card — continue below. A message describing an **end result**, or a task too big for one worker session, becomes sibling cards first: run `.claude/skills/triage/references/decomposition.md`, then return here to card each approved slice.
+
 1. **Route** via `registry/projects.md` keywords + card contents. If the project is **not `onboarded: yes`** → refuse the task in one line and offer onboarding (which is itself a task — see the onboard skill). Never brief a worker into a non-onboarded repo.
 
    If another instance already holds this project's lock and the operator wants a second lane, route to a **clone**: `project: <slug>~N`, path from the registry card's `## Clones` table. A clone is never onboarded again — it inherits the parent card's `onboarded:`, Product, Gotchas and History. Create it per the dispatch skill before briefing.
@@ -59,6 +61,8 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
 
 4. **Card** from `templates/task-card.md`, `state: queued`. Fill the Brief from the registry card (stack, test, dev-branch, gotchas, product pointers) — the worker should never rediscover what the registry already knows. Retry of a failed task → the Brief also points at the predecessor card's `## Handoff` section (and its Log) so the new worker starts from what's already ruled out.
 
+   **Touch-areas and parallel-safety** — fill both header fields on every card, including a lone S. `touch-areas:` names what the work reaches in durable terms (modules, schemas, config domains, shared interfaces), never file paths, which go stale while a card sits queued. It is the mechanical half: any two cards can be compared for overlap without reading either Brief. `parallel-safety:` is the judgment half — `independent` or `serialized`, plus the one line naming the shared contract that decides it — and it carries what no comparison can derive. Disjoint touch-areas are a **declaration, not a guarantee**: two cards sharing no area still clash when one changes a signature the other calls, which is why monitor re-runs the DoD after a sibling merges rather than trusting the field. Whether two cards actually run side by side stays dispatch's call.
+
    **Brief-writing principles** (adapted from mattpocock/skills AGENT-BRIEF):
    - **Behavioral, not procedural** — describe what the system should do after the work, current behavior vs desired behavior; the worker explores and plans itself (briefs, not plans — CLAUDE.md §6).
    - **Fill `### Why`** — the intent behind the operator's ask and the working mode (quick-and-dirty vs long-term-thorough), so the worker inherits it and can judge unanticipated trade-offs; monitor judges diff proportionality against it. You are the task's owner, not its dispatcher: the Why is what lets you and the worker judge scope-fit, not just DoD pass/fail.
@@ -68,10 +72,20 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
    - **Fill `### Out of scope`** — the adjacent things the worker must not touch. This is the cheapest defense against gold-plating and over-scoped diffs (monitor's over-scoped verdict starts here).
    - **Bug tasks: repro-first DoD** — the Brief requires the worker to produce one command that goes red on the bug before fixing (test, curl, CLI invocation). That command goes into the DoD; monitor reruns it at verification. No repro command → the fix claim is unverifiable.
    - **Cited validation, judged per card** (CLAUDE.md §2 rule 11) — the template's validation bullet is present by default. Delete it only when neither trigger can apply: no third party, no infrastructure you do not own, and no choice without a clear winner. When you keep it, name in `### Context` the specific vendors, APIs or consoles the worker will have to verify, so the mandate is concrete rather than generic.
+   - **Research before you commit, in proportion to the commitment** — the bullet above binds the worker; this one binds you. A Brief that names a library, an architectural pattern or a split strategy is a decision *you* made, so check it live first (a documentation-retrieval tool for library and SDK documentation, web search for vendor product behaviour and changelogs). Two exemptions carry most cases: the choice the **repo already made** (it is in the lockfile, or it is the pattern the codebase uses), and the choice you can **decline to make** — state the requirement and let the worker pick, since its own validation bullet already binds it there. Record what you compared, what won and why, with URL and read-date: `decisions/YYYY-MM-<your-shepherd-id>.md` is the home (its **Basis** is that source — CLAUDE.md §4), the one-line conclusion and URL also go in the card's `### Context` so the worker inherits it, and registry `## Context notes` takes it only when the finding outlives the task. An unrecorded search is no search.
 
-   **Decomposing L work**: when a thought is too big for one worker session, split it into **tracer-bullet slices** — each a narrow but complete vertical path (schema→API→UI→test), independently demoable, sized to one fresh worker context — as separate cards queued FIFO with blockers first. Note cross-card dependencies in each Brief (`Depends on: T-XXXX`). One mechanical wide refactor (rename, retype) is the exception: expand → migrate in batches → contract, each batch its own card. Present the proposed split to the operator for approval before creating the cards.
 5. Commit (`T-NNNN: captured → queued`) via `scripts/ledger-commit.sh`, then **invoke dispatch** if the working copy has no active task and the worker cap (CLAUDE.md §0) has headroom; otherwise say "queued behind T-XXXX" and stop.
 
-Triage decides *what and where*; dispatch decides *when and how*. Keep them separate.
+## 5. Amend or cancel
+
+The operator names an existing `T-NNNN` to change, extend or drop. Nothing is created; the target card's **`state:` decides who owns the edit**.
+
+- **`captured` or `queued`** — yours. Re-read the card from disk, edit the Brief, append the Log line in the operator's words, commit via `scripts/ledger-commit.sh` (`T-NNNN: brief amended`). Cancel → `state: abandoned`, reason in the Log. Task cards take no lock: their `owner:` is the only writer (CLAUDE.md §2 rule 10). Locks guard *registry* cards.
+- **`briefed`, `working` or `blocked`** — a worker is live, so the edit belongs to the owner acting through **monitor**. Classify it and hand it over.
+  - *Amend*: when the addition is separable, a new card beats a wider brief — one focused task per worker. When it genuinely changes what done means, update the card first, then send the worker one line pointing at it; the card is the contract.
+  - *Cancel*: route it through **retro** with verdict `abandoned` — harvest the `## Handoff`, retire the pane, release the project lock, registry `active-task: none`. The close-out path already does every step.
+- **`review`, `done` or `failed`** — the work is closed. What the operator wants is a new task; card it through §4.
+
+Triage decides *what and where*; dispatch decides *when and how*; an amendment goes to whichever skill owns the card's state now. Keep them separate.
 
 When a triage ends with nothing dispatched (answer, context ingestion, question, or a card queued behind another), finish with `scripts/self-recycle.sh decide` (CLAUDE.md §8 context check) — an idle moment is the cheapest time to recycle.

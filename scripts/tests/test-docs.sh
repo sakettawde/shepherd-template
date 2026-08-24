@@ -89,4 +89,56 @@ assert_ok "CLAUDE.md uses the hook's own framing" \
 assert_ok "CLAUDE.md names the second layer that does not travel" \
   grep -q 'permissions.deny' "$ROOT/CLAUDE.md"
 
+# --- parallelism metadata reaches its writer, its reader and the template ---
+# `touch-areas:` is written by triage onto every card; `parallel-safety:` is
+# triage's judgment and monitor's cue to re-run the DoD after a sibling merges.
+# A surface that never learned a field leaves it either unfilled or unread, and
+# an unread declaration is worse than no declaration: it reads as a check that
+# happened.
+for f in templates/task-card.md \
+         .claude/skills/triage/SKILL.md; do
+  assert_ok "touch-areas: is known to $f" grep -q 'touch-areas:' "$ROOT/$f"
+done
+for f in templates/task-card.md \
+         .claude/skills/triage/SKILL.md \
+         .claude/skills/monitor/SKILL.md; do
+  assert_ok "parallel-safety: is known to $f" grep -q 'parallel-safety:' "$ROOT/$f"
+done
+
+# One spelling each, for the reason working-agreement: has one. Scoped to the
+# framework surfaces rather than the whole tree: an instance's own task cards
+# are its state, nobody rewrites them, and a Brief may well use these words in
+# a sentence. The invariant that matters is that the writer, the readers and
+# the template agree — not that the words never appear in prose.
+FRAMEWORK_SURFACES=("$ROOT/templates" "$ROOT/.claude/skills" "$ROOT/scripts")
+
+tokens=$(grep -rhoiE 'touch[-_]areas:' \
+           --include='*.md' --include='*.sh' "${FRAMEWORK_SURFACES[@]}" 2>/dev/null | sort -u)
+assert_eq "one spelling of touch-areas, everywhere" "$tokens" "touch-areas:"
+
+tokens=$(grep -rhoiE 'parallel[-_]safe(ty)?:' \
+           --include='*.md' --include='*.sh' "${FRAMEWORK_SURFACES[@]}" 2>/dev/null | sort -u)
+assert_eq "one spelling of parallel-safety, everywhere" "$tokens" "parallel-safety:"
+
+# --- the outcome path ends at an approved split, never at a plan ------------
+# Both halves are load-bearing. Without the gate, triage cards an outcome from
+# its own reading of it; without the behavioural boundary, the split becomes an
+# implementation plan the orchestrator wrote for a worker that plans better.
+TRIAGE="$ROOT/.claude/skills/triage/SKILL.md"
+DECOMP="$ROOT/.claude/skills/triage/references/decomposition.md"
+assert_file "the decomposition reference exists" "$DECOMP"
+assert_ok "triage points at the decomposition reference" \
+  grep -q 'references/decomposition.md' "$TRIAGE"
+assert_ok "decomposition reserves no id before the operator answers" \
+  grep -q 'reserve no id before' "$DECOMP"
+assert_ok "decomposition holds the slice boundary at behaviour" \
+  grep -q 'Behavioral, not procedural' "$DECOMP"
+
+# --- intake covers compound messages and edits to existing cards ------------
+assert_ok "triage classifies a message into one or more types" \
+  grep -q 'one or more of five intake types' "$TRIAGE"
+assert_ok "triage has an amend/cancel path" grep -q 'Amend or cancel' "$TRIAGE"
+assert_ok "cancelling reaches the state the manual already defines" \
+  grep -q 'state: abandoned' "$TRIAGE"
+
 finish
