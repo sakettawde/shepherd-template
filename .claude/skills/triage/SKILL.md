@@ -1,11 +1,11 @@
 ---
 name: triage
-description: Turn every incoming message from the operator into exactly one of - a direct answer, context ingestion, a clarifying question, or a task card. Routes to onboarded projects, sizes/tiers/budgets tasks, enforces the onboarded-only gate, and offers onboarding when needed. Never dispatches work itself.
+description: Turn every incoming message from the operator into one or more of - a direct answer, context ingestion, a clarifying question, a task card, or an amendment to an existing card. Routes to onboarded projects, decomposes outcomes into approved slices, sizes/tiers/budgets tasks, enforces the onboarded-only gate, and offers onboarding when needed. Never dispatches work itself.
 ---
 
 # triage
 
-Every message is exactly ONE of four intake types. Classify first, then act.
+Every message carries **one or more of five intake types**. Split it into parts, classify each part, and act on context ingestion first — a Brief written before the note is banked cites nothing, and the note is what makes the Brief current. "We decided X, so change Y" is §2 followed by §4, in that order.
 
 ## 1. Answer
 
@@ -74,6 +74,16 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
    - **Cited validation, judged per card** (CLAUDE.md §2 rule 11) — the template's validation bullet is present by default. Delete it only when neither trigger can apply: no third party, no infrastructure you do not own, and no choice without a clear winner. When you keep it, name in `### Context` the specific vendors, APIs or consoles the worker will have to verify, so the mandate is concrete rather than generic.
 5. Commit (`T-NNNN: captured → queued`) via `scripts/ledger-commit.sh`, then **invoke dispatch** if the working copy has no active task and the worker cap (CLAUDE.md §0) has headroom; otherwise say "queued behind T-XXXX" and stop.
 
-Triage decides *what and where*; dispatch decides *when and how*. Keep them separate.
+## 5. Amend or cancel
+
+The operator names an existing `T-NNNN` to change, extend or drop. Nothing is created; the target card's **`state:` decides who owns the edit**.
+
+- **`captured` or `queued`** — yours. Re-read the card from disk, edit the Brief, append the Log line in the operator's words, commit (`T-NNNN: brief amended`). Cancel → `state: abandoned`, reason in the Log. Task cards take no lock: their `owner:` is the only writer (CLAUDE.md §2 rule 10). Locks guard *registry* cards.
+- **`briefed`, `working` or `blocked`** — a worker is live, so the edit belongs to the owner acting through **monitor**. Classify it and hand it over.
+  - *Amend*: when the addition is separable, a new card beats a wider brief — one focused task per worker. When it genuinely changes what done means, update the card first, then send the worker one line pointing at it; the card is the contract.
+  - *Cancel*: route it through **retro** with verdict `abandoned` — harvest the `## Handoff`, retire the pane, release the project lock, registry `active-task: none`. The close-out path already does every step.
+- **`review`, `done` or `failed`** — the work is closed. What the operator wants is a new task; card it through §4.
+
+Triage decides *what and where*; dispatch decides *when and how*; an amendment goes to whichever skill owns the card's state now. Keep them separate.
 
 When a triage ends with nothing dispatched (answer, context ingestion, question, or a card queued behind another), finish with `scripts/self-recycle.sh decide` (CLAUDE.md §8 context check) — an idle moment is the cheapest time to recycle.

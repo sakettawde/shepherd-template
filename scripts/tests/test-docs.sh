@@ -134,4 +134,11 @@ assert_ok "decomposition reserves no id before the operator answers" \
 assert_ok "decomposition holds the slice boundary at behaviour" \
   grep -q 'Behavioral, not procedural' "$DECOMP"
 
+# --- intake covers compound messages and edits to existing cards ------------
+assert_ok "triage classifies a message into one or more types" \
+  grep -q 'one or more of five intake types' "$TRIAGE"
+assert_ok "triage has an amend/cancel path" grep -q 'Amend or cancel' "$TRIAGE"
+assert_ok "cancelling reaches the state the manual already defines" \
+  grep -q 'state: abandoned' "$TRIAGE"
+
 finish
