@@ -120,4 +120,18 @@ tokens=$(grep -rhoiE 'parallel[-_]safe(ty)?:' \
            --include='*.md' --include='*.sh' "${FRAMEWORK_SURFACES[@]}" 2>/dev/null | sort -u)
 assert_eq "one spelling of parallel-safety, everywhere" "$tokens" "parallel-safety:"
 
+# --- the outcome path ends at an approved split, never at a plan ------------
+# Both halves are load-bearing. Without the gate, triage cards an outcome from
+# its own reading of it; without the behavioural boundary, the split becomes an
+# implementation plan the orchestrator wrote for a worker that plans better.
+TRIAGE="$ROOT/.claude/skills/triage/SKILL.md"
+DECOMP="$ROOT/.claude/skills/triage/references/decomposition.md"
+assert_file "the decomposition reference exists" "$DECOMP"
+assert_ok "triage points at the decomposition reference" \
+  grep -q 'references/decomposition.md' "$TRIAGE"
+assert_ok "decomposition reserves no id before the operator answers" \
+  grep -q 'reserve no id before' "$DECOMP"
+assert_ok "decomposition holds the slice boundary at behaviour" \
+  grep -q 'Behavioral, not procedural' "$DECOMP"
+
 finish

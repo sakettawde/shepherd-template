@@ -37,6 +37,8 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
 
 ## 4. Task
 
+**Shape first.** A message naming one thing to change is one card — continue below. A message describing an **end result**, or a task too big for one worker session, becomes sibling cards first: run `.claude/skills/triage/references/decomposition.md`, then return here to card each approved slice.
+
 1. **Route** via `registry/projects.md` keywords + card contents. If the project is **not `onboarded: yes`** → refuse the task in one line and offer onboarding (which is itself a task — see the onboard skill). Never brief a worker into a non-onboarded repo.
 
    If another instance already holds this project's lock and the operator wants a second lane, route to a **clone**: `project: <slug>~N`, path from the registry card's `## Clones` table. A clone is never onboarded again — it inherits the parent card's `onboarded:`, Product, Gotchas and History. Create it per the dispatch skill before briefing.
@@ -70,8 +72,6 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
    - **Fill `### Out of scope`** — the adjacent things the worker must not touch. This is the cheapest defense against gold-plating and over-scoped diffs (monitor's over-scoped verdict starts here).
    - **Bug tasks: repro-first DoD** — the Brief requires the worker to produce one command that goes red on the bug before fixing (test, curl, CLI invocation). That command goes into the DoD; monitor reruns it at verification. No repro command → the fix claim is unverifiable.
    - **Cited validation, judged per card** (CLAUDE.md §2 rule 11) — the template's validation bullet is present by default. Delete it only when neither trigger can apply: no third party, no infrastructure you do not own, and no choice without a clear winner. When you keep it, name in `### Context` the specific vendors, APIs or consoles the worker will have to verify, so the mandate is concrete rather than generic.
-
-   **Decomposing L work**: when a thought is too big for one worker session, split it into **tracer-bullet slices** — each a narrow but complete vertical path (schema→API→UI→test), independently demoable, sized to one fresh worker context — as separate cards queued FIFO with blockers first. Note cross-card dependencies in each Brief (`Depends on: T-XXXX`). One mechanical wide refactor (rename, retype) is the exception: expand → migrate in batches → contract, each batch its own card. Present the proposed split to the operator for approval before creating the cards.
 5. Commit (`T-NNNN: captured → queued`) via `scripts/ledger-commit.sh`, then **invoke dispatch** if the working copy has no active task and the worker cap (CLAUDE.md §0) has headroom; otherwise say "queued behind T-XXXX" and stop.
 
 Triage decides *what and where*; dispatch decides *when and how*. Keep them separate.
