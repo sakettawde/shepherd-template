@@ -141,4 +141,47 @@ assert_ok "triage has an amend/cancel path" grep -q 'Amend or cancel' "$TRIAGE"
 assert_ok "cancelling reaches the state the manual already defines" \
   grep -q 'state: abandoned' "$TRIAGE"
 
+# --- an approval pause claims blocked, never working (T-0152) ---------------
+# A pause that waits on shepherd input is the highest-value wake signal there
+# is, and the status-file watcher greps only done|blocked|failed - so a worker
+# that ends an approval pause `working` sits invisible until the heartbeat
+# backstop (~30 min). The wording is the whole fix: the watchers already treat
+# `blocked` as an instant wake. The canonical statement lives in the template,
+# because the card is the only surface a worker reads.
+CARD_TPL="$ROOT/templates/task-card.md"
+proto=$(sed -n '/^### Status protocol/,/^## Log/p' "$CARD_TPL")
+assert_ok "the template sorts the two by what happens next" \
+  grep -q 'Pick by what happens next' <<<"$proto"
+assert_ok "the template names approval as a blocked case" \
+  grep -q 'design approval' <<<"$proto"
+assert_ok "the template says blocked means shepherd input is needed" \
+  grep -q 'shepherd input to continue' <<<"$proto"
+assert_ok "the template says working means the worker continues alone" \
+  grep -q 'continue on your own next turn' <<<"$proto"
+# The why is what makes the rule survive a worker under pressure: without the
+# cost, `working - waiting for approval` reads as a perfectly honest report.
+assert_ok "the template states what the wrong choice costs" \
+  grep -q 'heartbeat' <<<"$proto"
+
+# One canonical statement, references elsewhere. Each of the three readers
+# below states the rule in a sentence and points home, so no two surfaces can
+# drift into disagreeing about the same sentinel.
+assert_ok "CLAUDE.md carries the blocked-vs-working rule" \
+  grep -q 'needs your input to continue' "$ROOT/CLAUDE.md"
+assert_ok "CLAUDE.md names the template as the canonical wording" \
+  grep -q 'canonical wording every Brief carries' "$ROOT/CLAUDE.md"
+assert_ok "monitor reads claim blocked as the worker waiting on you" \
+  grep -q 'waiting on you' "$ROOT/.claude/skills/monitor/SKILL.md"
+assert_ok "monitor points at the rule's home" \
+  grep -q 'CLAUDE.md §6 holds the rule' "$ROOT/.claude/skills/monitor/SKILL.md"
+# onboard's own Status protocol block REPLACES the template's, so an
+# onboarding worker never reads the canonical rule unless this block sends it
+# there.
+onboard_proto=$(sed -n '/^### Status protocol/,$p' \
+                  "$ROOT/.claude/skills/onboard/SKILL.md")
+assert_ok "onboard's status block points back at the canonical rule" \
+  grep -q 'task-card.md' <<<"$onboard_proto"
+assert_ok "onboard covers pauses its own two lines do not name" \
+  grep -q 'any other pause' <<<"$onboard_proto"
+
 finish

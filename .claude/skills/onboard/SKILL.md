@@ -70,3 +70,4 @@ Read-only with respect to all other files — this task changes nothing but CLAU
 
 ### Status protocol
 End phase 1 with `SHEPHERD: blocked — onboarding report and questions ready`. After receiving answers, finalize and end `SHEPHERD: done — onboarding complete, CLAUDE.md pushed`.
+For any other pause, `templates/task-card.md` `### Status protocol` decides: `blocked` whenever you need shepherd input to continue.

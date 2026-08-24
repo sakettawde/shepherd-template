@@ -33,7 +33,7 @@ A background watcher task exited — the status-file watcher (exit 0 = terminal 
 | **lying** | claim done but git/DoD disagree, or DoD/test files were tampered with | `state: working`, reply via R4 naming the concrete gap (`Your done claim failed verification: <fact>. Fix and re-verify.`), Log it as a failed verification cycle, re-arm |
 | **over-scoped** | DoD passes but the diff carries substantial changes the Brief never required | Read the actual diff and take a call: extras genuinely needed → accept, Log the justification; not needed → R4 reply to pare the branch back to the minimal diff (counts as a failed verification cycle); the whole approach went sideways → fail it, retry from another angle as a new heavy-tier task. Low confidence in the call → escalate with the diffstat |
 
-`claim: working` is a progress checkpoint, never terminal — `hooks/worker-stop.sh` matches the sentinel on its own line and records the last one in the turn, so a worker that merely writes *about* a claim no longer records one (T-0093; fixed 2026-08-23).
+`claim: blocked` is the worker waiting on you — a design approval, an answer, a ruling — which is why it is the fastest wake signal you get; CLAUDE.md §6 holds the rule. `claim: working` is a progress checkpoint, never terminal — `hooks/worker-stop.sh` matches the sentinel on its own line and records the last one in the turn, so a worker that merely writes *about* a claim no longer records one (T-0093; fixed 2026-08-23).
 
 ## Invariants
 

@@ -49,7 +49,8 @@ Project: <path>. Stack: <stack>. Dev branch: <dev-branch>. DoD command: `<cmd>`.
 ### Status protocol
 End every pause and your final message with exactly one line, on a line of its own:
 `SHEPHERD: done|blocked|failed|working — <one short line>`
-`working` is a mid-task progress checkpoint and is never terminal; the other three end the task.
+Pick by what happens next. **`blocked`** — you need shepherd input to continue: a design approval, an answer, a ruling, a permission. **`working`** — you continue on your own next turn; a progress checkpoint, never terminal. `done` and `failed` end the task; `blocked` pauses it.
+Shepherd wakes on `blocked` within seconds and on `working` only at the next heartbeat, so an approval pause that ends `working` waits up to 30 minutes for a reply.
 
 ## Log
 - <HH:MM> captured (<source thought, verbatim-ish>)
