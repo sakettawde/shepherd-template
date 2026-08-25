@@ -228,6 +228,49 @@ whose only assumption is that Claude Code keeps writing session transcripts to
 `~/.claude/projects/*/<session-id>.jsonl`; that layout is observed on this machine and is what
 `self-recycle.sh meter` has already depended on.
 
+## 7. Live validation
+
+Run against a pane created and closed for the purpose (`w18:p1`, Haiku), with the real herdr
+CLI, 2026-08-25.
+
+**Canary — normal recycle, unattended, 10 seconds end to end:**
+
+```
+20:24:03 ARM             pane=w18:p1 session=ff6c72df… box=clean (clear_timeout=120s attempts=3)
+20:24:03 POLL            session=ff6c72df… baseline=ff6c72df…
+20:24:05 POLL            session=8844be79… baseline=ff6c72df…
+20:24:05 CLEAR-CONFIRMED session ff6c72df… -> 8844be79…
+20:24:10 SETTLE          waited 5s
+20:24:11 PROMPT-SENT     attempt 1/3 box=clean
+20:24:13 VERIFIED        session 8844be79… received the recovery prompt on attempt 1
+```
+
+The fresh session's status line went from `ctx: –` to `ctx 15%/200k`, confirming it took a turn.
+
+**Give-up path, against real herdr:** `watch` armed with the pane's *live* session id as its
+baseline — a clear that can never come. Exit 3 after a full poll trail and a `GIVE-UP` verdict,
+with the toast raised. No silent exit.
+
+**The 2026-08-18 failure, replayed:** the box was deliberately put into bash mode, then
+`recycle` was run. The `Escape` preflight rescued it (`box=clean` in the `ARM` line), the clear
+landed at the second poll, and recovery verified at attempt 1 — 10 seconds, unattended. The
+failure that cost an incident is now handled without anyone noticing it happened.
+
+### A correction the live run forced
+
+The first live attempt **refused** with `prompt box is other after Escape`. The box read
+`❯  I need a task description to suggest your next step.` — Claude Code's own **suggested**
+prompt, which `Escape` does not dismiss. Submitting `/clear` into it by hand worked anyway and
+the session id moved, proving the suggestion is ghost text, not input.
+
+The preflight was too strict, and in a way that mattered: a shepherd pane shows a suggestion
+routinely, so the design as first built would have refused most real recycles. R10's Gotchas
+already record that no pane-read source can tell a suggestion from a human draft, and that the
+standing rule is not to hold work over apparent text. The check was narrowed to bash mode
+alone — the only box state measured to actually swallow a `/clear` — with the observed state
+logged either way. A genuine draft that did swallow the clear is caught by the session-id gate,
+loudly, which is exactly what that gate is for.
+
 ### Residual risks, named
 
 - If the herdr `claude` integration is uninstalled or downgraded below v8, `agent_session` goes

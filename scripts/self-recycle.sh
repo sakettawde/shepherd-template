@@ -125,11 +125,16 @@ except Exception:
 ' 2>/dev/null || printf 'unknown\n'
 }
 
-# prompt_box <pane> — clean | bash | other.
-#   clean = a bare "❯" and nothing after it: safe to submit into.
+# prompt_box <pane> — clean | bash | other. Reported for the log; only `bash` decides.
+#   clean = a bare "❯" and nothing after it.
 #   bash  = the box is in shell mode; anything submitted runs as a shell command and the
 #           /clear is swallowed (measured 2026-08-25, and the 2026-08-18 incident).
-#   other = a draft, a dialog, or an unreadable pane. Never submitted into.
+#   other = text after the "❯". USUALLY Claude Code's own suggested prompt, which is ghost
+#           text: measured 2026-08-25, a box reading "❯  I need a task description to
+#           suggest your next step." accepted /clear normally and the session id moved. A
+#           pane read cannot tell a suggestion from a human draft (R10 Gotchas), so `other`
+#           is logged and proceeded through — refusing on it would hold a legitimate
+#           recycle over ghost text, and the session-id gate catches a real failure loudly.
 prompt_box() {
   local out
   out=$(herdr pane read "$1" --source visible --lines 8 --format text 2>/dev/null) || true
@@ -144,16 +149,18 @@ prompt_box() {
   printf 'other\n'
 }
 
-# prompt_mode_ok <pane> — force the box into normal prompt mode, then PROVE it.
-# Escape leaves bash mode and clears a draft (measured 2026-08-25). Forcing without
-# verifying is what the old recipe did by hand, and it is how a swallowed /clear got
-# through; the read-back is the part that matters.
+# prompt_mode_ok <pane> — force the box out of bash mode, then PROVE it left.
+# Escape leaves bash mode (measured 2026-08-25); forcing without verifying is what the old
+# recipe did by hand, and it is how a swallowed /clear got through. The read-back is the
+# part that matters. Only bash mode fails this check — see prompt_box on why `other` does
+# not. Prints the observed state so the caller can log what it saw.
 prompt_mode_ok() {
   local pane=$1 st
   herdr pane send-keys "$pane" Escape >/dev/null 2>&1 || true
   [ "$ESCAPE_SETTLE" = 0 ] || sleep "$ESCAPE_SETTLE"
   st=$(prompt_box "$pane")
-  [ "$st" = clean ]
+  BOX_STATE=$st
+  [ "$st" != bash ]
 }
 
 # verify_prompt <session-id> <message> — ground truth that the prompt ARRIVED, not that
@@ -250,12 +257,12 @@ PY
     fi
 
     if ! prompt_mode_ok "$pane"; then
-      rlog REFUSED "pane=$pane prompt box is $(prompt_box "$pane") after Escape; refusing to submit /clear into it"
-      rtoast "shepherd recycle REFUSED" "The input box on $pane will not return to prompt mode. Nothing was cleared."
+      rlog REFUSED "pane=$pane prompt box is still in bash mode after Escape; a /clear there would run as a shell command"
+      rtoast "shepherd recycle REFUSED" "The input box on $pane will not leave bash mode. Nothing was cleared."
       exit 2
     fi
 
-    rlog ARM "pane=$pane session=$s0 watchdog armed (clear_timeout=${CLEAR_TIMEOUT}s attempts=$ATTEMPTS) msg=$msg"
+    rlog ARM "pane=$pane session=$s0 box=$BOX_STATE watchdog armed (clear_timeout=${CLEAR_TIMEOUT}s attempts=$ATTEMPTS) msg=$msg"
     # Detached so it outlives the /clear. Measured 2026-08-25: setsid+nohup keeps its own
     # session and process group, survives the calling turn, and inherits HERDR_SOCKET_PATH.
     # stderr joins the log, so even a crash before the first rlog leaves a trace.
@@ -310,9 +317,9 @@ PY
     while [ "$a" -le "$ATTEMPTS" ]; do
       if prompt_mode_ok "$pane"; then
         herdr agent prompt "$pane" "$msg" >/dev/null 2>&1 || true
-        rlog PROMPT-SENT "attempt $a/$ATTEMPTS pane=$pane session=$new"
+        rlog PROMPT-SENT "attempt $a/$ATTEMPTS pane=$pane session=$new box=$BOX_STATE"
       else
-        rlog REFUSED "attempt $a/$ATTEMPTS pane=$pane prompt box not in normal mode; not submitting"
+        rlog REFUSED "attempt $a/$ATTEMPTS pane=$pane still in bash mode; not submitting"
       fi
       vdead=$(( $(date +%s) + VERIFY ))
       while :; do

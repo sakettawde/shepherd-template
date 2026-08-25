@@ -182,6 +182,21 @@ assert_ok "Escape is sent"         grep -q 'pane send-keys w1:p1 Escape' "$CALLS
 assert_ok "the clear is submitted" grep -q 'agent prompt w1:p1 /clear'   "$CALLS"
 assert_ok "arming is logged"       grep -q ' ARM '                       "$LOG"
 
+# === F6b: a SUGGESTED prompt in the box must not hold the recycle ===========
+# Measured live 2026-08-25: a pane whose box read
+#   "❯  I need a task description to suggest your next step."
+# accepted /clear normally and its session id moved — the suggestion is ghost
+# text, and Escape does not dismiss it. A pane read cannot tell a suggestion
+# from a human draft (R10 Gotchas), so refusing on either would hold a
+# legitimate recycle over nothing. Only bash mode is a real blocker; a genuine
+# draft that did break the clear is caught loudly by the session-id gate.
+scene SID-OLD working "❯  I need a task description to suggest your next step." now
+touch "$HERDR_STUB_DIR/stuck"        # Escape leaves it exactly as it is
+run recycle "$MSG" --pane w1:p1
+assert_eq "a suggested prompt does not hold the recycle" "$?" "0"
+assert_ok "the clear is still submitted" grep -q 'agent prompt w1:p1 /clear' "$CALLS"
+assert_ok "and the box state is logged for diagnosis" grep -q 'box=other' "$LOG"
+
 # === F7: a box that will not leave bash mode refuses, and submits nothing ====
 scene SID-OLD working "!" now
 touch "$HERDR_STUB_DIR/stuck"
