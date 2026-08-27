@@ -88,4 +88,4 @@ The operator names an existing `T-NNNN` to change, extend or drop. Nothing is cr
 
 Triage decides *what and where*; dispatch decides *when and how*; an amendment goes to whichever skill owns the card's state now. Keep them separate.
 
-When a triage ends with nothing dispatched (answer, context ingestion, question, or a card queued behind another), finish with `scripts/self-recycle.sh decide` (CLAUDE.md §8 context check) — an idle moment is the cheapest time to recycle.
+When a triage ends with nothing dispatched (answer, context ingestion, question, or a card queued behind another), finish with `scripts/context-rollover.sh decide` (CLAUDE.md §8 context check) — an idle moment is the cheapest time to roll over.

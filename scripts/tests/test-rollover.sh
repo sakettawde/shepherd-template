@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Probe for scripts/self-recycle.sh's recycle/watch path — the sequence that
+# Probe for scripts/context-rollover.sh's rollover/watch path — the sequence that
 # resets shepherd's own context and prompts the fresh session back to work.
 #
 # Why this file exists: on 2026-08-25 the old `inject` subcommand gated on
 # `agent_status == idle`, polled for six minutes, and exited having written
-# nothing. Measurements in docs/specs/self-recycle-design.md show a shepherd
+# nothing. Measurements in docs/specs/context-rollover-design.md show a shepherd
 # pane can NEVER report idle — its watcher shells pin it to `working` through
 # the detection manifest's background_shell_working rule (priority 965), which
 # outranks the live_prompt_box idle rule (950) even when the prompt box is a
@@ -20,9 +20,9 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/harness.sh"
 sandbox
-SCRIPT="$HERE/../self-recycle.sh"
+SCRIPT="$HERE/../context-rollover.sh"
 
-echo "test-recycle:"
+echo "test-rollover:"
 
 if ! command -v python3 >/dev/null 2>&1; then
   fail "python3 is available" "python3 not found — the script and this probe both need it"
@@ -31,10 +31,10 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 # MANDATORY: a worker session running this probe inherits its own
-# SHEPHERD_RECYCLE_* and HERDR_* environment. A case that did not override them
+# SHEPHERD_ROLLOVER_* and HERDR_* environment. A case that did not override them
 # would otherwise poll the live instance's pane or append to the operator's
-# real recycle log. Measured hazard, not theoretical — see test-notify.sh.
-unset SHEPHERD_RECYCLE_LOG SHEPHERD_RECYCLE_SOUND SHEPHERD_TASK_ID
+# real rollover log. Measured hazard, not theoretical — see test-notify.sh.
+unset SHEPHERD_ROLLOVER_LOG SHEPHERD_ROLLOVER_SOUND SHEPHERD_TASK_ID
 
 BIN="$SHEPHERD_ROOT/bin"
 mkdir -p "$BIN"
@@ -109,7 +109,7 @@ scene() {
   printf '%s\n' "$4" > "$dir/flip"
   : > "$dir/calls"
   export HERDR_STUB_DIR="$dir"
-  LOG="$dir/recycle.log"
+  LOG="$dir/rollover.log"
   CALLS="$dir/calls"
 }
 
@@ -117,11 +117,11 @@ scene() {
 # and every timing shrunk so the suite stays fast.
 run() {
   PATH="$BIN:$PATH" \
-  SHEPHERD_RECYCLE_POLL=1 SHEPHERD_RECYCLE_CLEAR_TIMEOUT=3 \
-  SHEPHERD_RECYCLE_SETTLE=0 SHEPHERD_RECYCLE_VERIFY=2 SHEPHERD_RECYCLE_ATTEMPTS=2 \
-  SHEPHERD_RECYCLE_ESCAPE_SETTLE=0 \
-  SHEPHERD_RECYCLE_PROJECTS="${PROJECTS_OVERRIDE:-$HERDR_STUB_DIR/projects}" \
-  SHEPHERD_RECYCLE_LOG="$LOG" \
+  SHEPHERD_ROLLOVER_POLL=1 SHEPHERD_ROLLOVER_CLEAR_TIMEOUT=3 \
+  SHEPHERD_ROLLOVER_SETTLE=0 SHEPHERD_ROLLOVER_VERIFY=2 SHEPHERD_ROLLOVER_ATTEMPTS=2 \
+  SHEPHERD_ROLLOVER_ESCAPE_SETTLE=0 \
+  SHEPHERD_ROLLOVER_PROJECTS="${PROJECTS_OVERRIDE:-$HERDR_STUB_DIR/projects}" \
+  SHEPHERD_ROLLOVER_LOG="$LOG" \
   bash "$SCRIPT" "$@" --log "$LOG" >/dev/null 2>&1
 }
 
@@ -176,31 +176,31 @@ assert_eq "the stub always claims success" \
 
 # === F6: preflight forces prompt mode before submitting anything ============
 scene SID-OLD working "!" now
-run recycle "$MSG" --pane w1:p1
+run rollover "$MSG" --pane w1:p1
 assert_eq "a box that comes clean after Escape arms" "$?" "0"
 assert_ok "Escape is sent"         grep -q 'pane send-keys w1:p1 Escape' "$CALLS"
 assert_ok "the clear is submitted" grep -q 'agent prompt w1:p1 /clear'   "$CALLS"
 assert_ok "arming is logged"       grep -q ' ARM '                       "$LOG"
 
-# === F6b: a SUGGESTED prompt in the box must not hold the recycle ===========
+# === F6b: a SUGGESTED prompt in the box must not hold the rollover ===========
 # Measured live 2026-08-25: a pane whose box read
 #   "❯  I need a task description to suggest your next step."
 # accepted /clear normally and its session id moved — the suggestion is ghost
 # text, and Escape does not dismiss it. A pane read cannot tell a suggestion
 # from a human draft (R10 Gotchas), so refusing on either would hold a
-# legitimate recycle over nothing. Only bash mode is a real blocker; a genuine
+# legitimate rollover over nothing. Only bash mode is a real blocker; a genuine
 # draft that did break the clear is caught loudly by the session-id gate.
 scene SID-OLD working "❯  I need a task description to suggest your next step." now
 touch "$HERDR_STUB_DIR/stuck"        # Escape leaves it exactly as it is
-run recycle "$MSG" --pane w1:p1
-assert_eq "a suggested prompt does not hold the recycle" "$?" "0"
+run rollover "$MSG" --pane w1:p1
+assert_eq "a suggested prompt does not hold the rollover" "$?" "0"
 assert_ok "the clear is still submitted" grep -q 'agent prompt w1:p1 /clear' "$CALLS"
 assert_ok "and the box state is logged for diagnosis" grep -q 'box=other' "$LOG"
 
 # === F7: a box that will not leave bash mode refuses, and submits nothing ====
 scene SID-OLD working "!" now
 touch "$HERDR_STUB_DIR/stuck"
-run recycle "$MSG" --pane w1:p1
+run rollover "$MSG" --pane w1:p1
 assert_eq "a box stuck in bash mode refuses" "$?" "2"
 assert_ok "the refusal is logged"     grep -q ' REFUSED '                 "$LOG"
 assert_ok "the refusal toasts"        grep -q 'notification show'         "$CALLS"
@@ -208,14 +208,14 @@ assert_fail "no /clear was submitted" grep -q 'agent prompt w1:p1 /clear' "$CALL
 
 # === F8: a blocked pane refuses — /clear would answer an open dialog ========
 scene SID-OLD blocked "❯" now
-run recycle "$MSG" --pane w1:p1
+run rollover "$MSG" --pane w1:p1
 assert_eq "a blocked pane refuses" "$?" "2"
 assert_ok "the refusal is logged"     grep -q ' REFUSED '                 "$LOG"
 assert_fail "no /clear was submitted" grep -q 'agent prompt w1:p1 /clear' "$CALLS"
 
 # === F9: no session id at all — the herdr claude integration is missing =====
 scene "" unknown "❯" never
-run recycle "$MSG" --pane w1:p1
+run rollover "$MSG" --pane w1:p1
 assert_eq "a pane with no Claude session refuses" "$?" "2"
 assert_ok "the refusal is logged"     grep -q ' REFUSED '                 "$LOG"
 assert_fail "no /clear was submitted" grep -q 'agent prompt w1:p1 /clear' "$CALLS"
@@ -245,10 +245,10 @@ assert_ok "and still logs why" grep -q ' REFUSED ' "$LOG"
 
 # --log must be honoured wherever it sits on the line. Order-dependent parsing
 # was a real defect here: with --log ahead of the positionals the script kept
-# the DEFAULT path, which in a test run is the operator's live recycle log.
+# the DEFAULT path, which in a test run is the operator's live rollover log.
 scene SID-OLD working "❯" never
 FLAGFIRST="$HERDR_STUB_DIR/flag-first.log"
-PATH="$BIN:$PATH" SHEPHERD_RECYCLE_CLEAR_TIMEOUT=1 SHEPHERD_RECYCLE_POLL=1 \
+PATH="$BIN:$PATH" SHEPHERD_ROLLOVER_CLEAR_TIMEOUT=1 SHEPHERD_ROLLOVER_POLL=1 \
   bash "$SCRIPT" watch --log "$FLAGFIRST" w1:p1 SID-OLD "$MSG" >/dev/null 2>&1
 assert_file "--log is honoured before the positionals" "$FLAGFIRST"
 assert_ok "and the run still reached a verdict" grep -q ' GIVE-UP ' "$FLAGFIRST"
@@ -259,5 +259,50 @@ assert_eq "ctx with no pane says unknown" \
   "$(HERDR_PANE_ID= bash "$SCRIPT" ctx 2>/dev/null)" "unknown"
 assert_eq "an unknown subcommand still fails loudly" \
   "$(bash "$SCRIPT" nonsense 2>&1 >/dev/null | head -1)" "unknown cmd: nonsense"
+
+# === F13: the deprecation shim at the old path still works ==================
+# An instance mid-upgrade may still hold the old path in its context or in a
+# ported CLAUDE.md. The shim must forward every subcommand, map the old
+# `recycle` verb to `rollover`, map SHEPHERD_RECYCLE_LOG, and say on stderr
+# that it is deprecated — loudly enough that nobody keeps using it by accident.
+SHIM="$HERE/../self-recycle.sh"
+assert_file "the old path still exists as a shim" "$SHIM"
+
+assert_eq "the shim forwards a plain subcommand" \
+  "$(HERDR_PANE_ID= bash "$SHIM" ctx 2>/dev/null)" "unknown"
+assert_ok "the shim warns on stderr" \
+  bash -c 'HERDR_PANE_ID= bash "$1" ctx 2>&1 >/dev/null | grep -qi deprecat' _ "$SHIM"
+assert_ok "the warning names the new script" \
+  bash -c 'HERDR_PANE_ID= bash "$1" ctx 2>&1 >/dev/null | grep -q context-rollover.sh' _ "$SHIM"
+
+# The verb map, proven by a side effect only `rollover` produces: an unmapped
+# `recycle` would reach the new script as an unknown subcommand and exit 1.
+scene SID-OLD working "❯" now
+SCRIPT="$SHIM" run recycle "$MSG" --pane w1:p1
+assert_eq "the shim maps recycle to rollover" "$?" "0"
+assert_ok "and the rollover armed"          grep -q ' ARM '                     "$LOG"
+assert_ok "and the clear was submitted"     grep -q 'agent prompt w1:p1 /clear' "$CALLS"
+
+# The old env var still steers the log for one release.
+scene SID-OLD working "❯" never
+OLDVAR="$HERDR_STUB_DIR/old-var.log"
+# HOME is redirected too: if the mapping ever breaks, the run must land in the
+# sandbox and fail this assertion — never append to the operator's real log.
+PATH="$BIN:$PATH" HOME="$HERDR_STUB_DIR" SHEPHERD_RECYCLE_LOG="$OLDVAR" \
+  SHEPHERD_ROLLOVER_CLEAR_TIMEOUT=1 SHEPHERD_ROLLOVER_POLL=1 \
+  bash "$SHIM" watch w1:p1 SID-OLD "$MSG" >/dev/null 2>&1
+assert_file "the shim maps SHEPHERD_RECYCLE_LOG to SHEPHERD_ROLLOVER_LOG" "$OLDVAR"
+SCRIPT="$HERE/../context-rollover.sh"
+
+# === F14: the invocation vocabulary stays neutral ===========================
+# The whole point of the rename (T-0185): the command a shepherd turn actually
+# types must not read to a permission classifier like a destructive or
+# self-modifying action. Structural, so a future edit cannot quietly undo it.
+assert_ok "the shim hands over with exec"          grep -q 'exec bash' "$SHIM"
+assert_fail "the shim carries no logic of its own" grep -q 'herdr ' "$SHIM"
+assert_fail "the new script carries no recycle vocabulary" \
+  grep -qi 'recycl' "$SCRIPT"
+assert_ok "the new script answers the rollover verb" \
+  grep -q '^  rollover)' "$SCRIPT"
 
 finish
