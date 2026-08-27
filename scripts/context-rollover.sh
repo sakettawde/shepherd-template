@@ -14,13 +14,30 @@
 #         hold     = the idle trigger fired but active cards are owned (roll over at close-out)
 #   context-rollover.sh meter <session-id>
 #       prints current context tokens (from own transcript; legacy, approximate)
-#   context-rollover.sh rollover <msg> [--pane P] [--sound S] [--log F]
-#       the whole reset: preflight own pane, arm the detached watchdog, submit /clear.
-#       Shepherd runs this in ONE turn and then ends the turn.
-#   context-rollover.sh watch <pane> <old-session-id> <msg> [--sound S] [--log F]
-#       the watchdog itself. Armed by `rollover`; a separate subcommand so it is directly
-#       testable. Exit 0 recovered, 2 precondition, 3 the /clear never took, 4 the recovery
-#       prompt never arrived.
+#   context-rollover.sh rollover [msg] [--pane P] [--sound S] [--log F]
+#       READ-ONLY foreground: preflight own pane, arm the detached watchdog, print, exit.
+#       It sends NO keystroke to the pane — see WHY THE FOREGROUND TOUCHES NOTHING below.
+#       Shepherd runs this in ONE turn and then ends the turn. `msg` defaults to the
+#       one-word recovery line below, so the whole invocation is `rollover` and nothing
+#       else — pass one only to recover a pane into something other than the wake skill.
+#   context-rollover.sh watch <pane> <old-session-id> <msg> [--parent PID] [--sound S] [--log F]
+#       the watchdog itself, and the only thing that ever touches the pane. Armed by
+#       `rollover`; a separate subcommand so it is directly testable. With --parent it
+#       waits for that pid to exit before the first keystroke. Exit 0 recovered,
+#       2 precondition, 3 the /clear never took, 4 the recovery prompt never arrived,
+#       5 the foreground call never finished so nothing was sent.
+#
+# WHY THE FOREGROUND TOUCHES NOTHING
+# Measured 2026-08-27. The previous shape sent `herdr pane send-keys <own-pane> Escape`
+# from the foreground, while that foreground was still running as the shepherd's own
+# Bash tool call. Claude Code reads an Escape into its pane as INTERRUPT THE RUNNING
+# TOOL — and the running tool was this very script. The pane showed `Bash interrupted`,
+# the script died before it armed the watchdog and before the /clear, and the instance
+# sat idle with no watchers for hours. It looked like a permission block and was not:
+# the command interrupted itself. So the foreground is read-only (`pane get`,
+# `pane read`), and every keystroke — Escape, the bash-mode read-back, /clear, the
+# recovery prompt — is sent by the DETACHED watchdog only after the foreground pid is
+# gone. Full account: docs/specs/context-rollover-design.md §8.
 #
 # WHY THE GATE IS THE SESSION ID, NOT `idle`
 # The predecessor waited for `agent_status: idle` on shepherd's own pane. Measured
@@ -52,6 +69,8 @@ self=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -
 
 # --- rollover/watch tunables. Every one has a working default; tests shrink them. -------
 POLL=${SHEPHERD_ROLLOVER_POLL:-2}                    # seconds between polls
+PARENT_TIMEOUT=${SHEPHERD_ROLLOVER_PARENT_TIMEOUT:-60} # how long the foreground has to exit
+HANDOFF=${SHEPHERD_ROLLOVER_HANDOFF:-5}              # settle after it does, before keystroke 1
 CLEAR_TIMEOUT=${SHEPHERD_ROLLOVER_CLEAR_TIMEOUT:-120} # how long a /clear has to take
 SETTLE=${SHEPHERD_ROLLOVER_SETTLE:-5}                # pause after the clear, before prompting
 ATTEMPTS=${SHEPHERD_ROLLOVER_ATTEMPTS:-3}            # recovery prompt attempts
@@ -61,10 +80,23 @@ PROJECTS=${SHEPHERD_ROLLOVER_PROJECTS:-$HOME/.claude/projects}
 ROLLOVER_LOG=${SHEPHERD_ROLLOVER_LOG:-$HOME/.claude/shepherd-rollover.log}
 SOUND=${SHEPHERD_ROLLOVER_SOUND:-request}
 
+# The recovery line typed into the fresh session. ONE WORD, and a word Claude Code
+# resolves without reading anything first: `.claude/skills/wake/SKILL.md` is
+# user-invocable as `/wake` (observed live 2026-08-27 — a session that created the
+# directory had `/wake` in its skill list on the next turn). The predecessor was a
+# sentence of prose telling the fresh session to go read CLAUDE.md §8 and improvise
+# the steps; the skill now holds those steps, so the prose has nothing left to say.
+# Keeping it here rather than at every call site also shrinks the command a shepherd
+# turn actually types down to `context-rollover.sh rollover`, which is the smallest
+# surface any permission layer can be shown. Verify the message ARRIVES (verify_prompt
+# greps the new transcript for this exact string), so every quoting surface must match:
+# CLAUDE.md §8, adapter R10, docs/specs/context-rollover-design.md, test-rollover.sh.
+ROLLOVER_MSG=${SHEPHERD_ROLLOVER_MSG:-/wake}
+
 # rlog <PHASE> <detail> — the single documented trail. Appended, never truncated, so a
-# give-up is still readable hours later. Phases: ARM POLL CLEAR-CONFIRMED SETTLE
-# PROMPT-SENT VERIFIED GIVE-UP REFUSED. Never fails the caller: a log that cannot be
-# written must not be the reason a rollover dies.
+# give-up is still readable hours later. Phases: ARM HANDOFF CLEAR-SENT POLL
+# CLEAR-CONFIRMED SETTLE PROMPT-SENT VERIFIED GIVE-UP REFUSED. Never fails the caller:
+# a log that cannot be written must not be the reason a rollover dies.
 rlog() {
   local dir
   dir=$(dirname "$ROLLOVER_LOG")
@@ -90,9 +122,11 @@ rtoast() {
 parse_args() {
   POSITIONAL=()
   OPT_PANE=""
+  OPT_PARENT=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --pane)  OPT_PANE=${2:-};  shift 2 || shift $# ;;
+      --pane)   OPT_PANE=${2:-};   shift 2 || shift $# ;;
+      --parent) OPT_PARENT=${2:-}; shift 2 || shift $# ;;
       --sound) SOUND=${2:-request}; shift 2 || shift $# ;;
       --log)   ROLLOVER_LOG=${2:-$ROLLOVER_LOG}; shift 2 || shift $# ;;
       --) shift; while [ $# -gt 0 ]; do POSITIONAL+=("$1"); shift; done ;;
@@ -156,6 +190,8 @@ prompt_box() {
 # recipe did by hand, and it is how a swallowed /clear got through. The read-back is the
 # part that matters. Only bash mode fails this check — see prompt_box on why `other` does
 # not. Prints the observed state so the caller can log what it saw.
+# CALLED FROM THE WATCHDOG ONLY. Sending this Escape from the foreground is what killed
+# the foreground's own tool call on 2026-08-27 (see the header note).
 prompt_mode_ok() {
   local pane=$1 st
   herdr pane send-keys "$pane" Escape >/dev/null 2>&1 || true
@@ -231,16 +267,20 @@ PY
     ;;
 
   rollover)
-    # Preflight, arm, submit. Everything that can refuse does so BEFORE the /clear goes
-    # out, so a refusal leaves shepherd exactly as it was — context intact, nothing queued.
+    # READ-ONLY. Preflight, arm, print, exit — inside a second, and without touching the
+    # pane. Everything that can refuse from here does so BEFORE the watchdog is armed, so
+    # a refusal leaves shepherd exactly as it was: context intact, nothing queued, no
+    # detached process left behind. The keystroke half lives in `watch` and starts only
+    # once this process is gone (header note: an Escape from here interrupts the Bash
+    # tool call that is running this very script).
     shift
     parse_args "$@"
-    msg=${POSITIONAL[0]:-}
+    msg=${POSITIONAL[0]:-$ROLLOVER_MSG}
     pane=${OPT_PANE:-${HERDR_PANE_ID:-}}
     set +e
-    if [ -z "$msg" ] || [ -z "$pane" ]; then
-      rlog REFUSED "rollover needs a message and a pane (pane=${pane:-none})"
-      rtoast "shepherd context rollover REFUSED" "rollover was called without a message or a pane; nothing was cleared."
+    if [ -z "$pane" ]; then
+      rlog REFUSED "rollover needs a pane and found none (HERDR_PANE_ID unset and no --pane)"
+      rtoast "shepherd context rollover REFUSED" "rollover was called with no pane; nothing was cleared."
       exit 2
     fi
 
@@ -258,20 +298,20 @@ PY
       exit 2
     fi
 
-    if ! prompt_mode_ok "$pane"; then
-      rlog REFUSED "pane=$pane prompt box is still in bash mode after Escape; a /clear there would run as a shell command"
-      rtoast "shepherd context rollover REFUSED" "The input box on $pane will not leave bash mode. Nothing was cleared."
-      exit 2
-    fi
+    # Observed, not acted on. A box in bash mode is the watchdog's problem: it is what
+    # sends the Escape, and it refuses there if the box will not leave. Recording the
+    # state here still costs nothing and dates the observation in the log.
+    box=$(prompt_box "$pane")
 
-    rlog ARM "pane=$pane session=$s0 box=$BOX_STATE watchdog armed (clear_timeout=${CLEAR_TIMEOUT}s attempts=$ATTEMPTS) msg=$msg"
-    # Detached so it outlives the /clear. Measured 2026-08-25: setsid+nohup keeps its own
-    # session and process group, survives the calling turn, and inherits HERDR_SOCKET_PATH.
-    # stderr joins the log, so even a crash before the first rlog leaves a trace.
-    setsid nohup bash "$self" watch "$pane" "$s0" "$msg" --sound "$SOUND" --log "$ROLLOVER_LOG" \
+    rlog ARM "pane=$pane session=$s0 box_before=$box watchdog armed (parent=$$ handoff=${HANDOFF}s clear_timeout=${CLEAR_TIMEOUT}s attempts=$ATTEMPTS) msg=$msg"
+    # Detached so it outlives this process AND the tool call carrying it. Measured
+    # 2026-08-25: setsid+nohup keeps its own session and process group, survives the
+    # calling turn, and inherits HERDR_SOCKET_PATH. stderr joins the log, so even a crash
+    # before the first rlog leaves a trace.
+    setsid nohup bash "$self" watch "$pane" "$s0" "$msg" \
+      --parent "$$" --sound "$SOUND" --log "$ROLLOVER_LOG" \
       >> "$ROLLOVER_LOG" 2>&1 &
 
-    herdr agent prompt "$pane" "/clear" >/dev/null 2>&1 || true
     printf 'rollover armed: pane=%s session=%s log=%s\n' "$pane" "$s0" "$ROLLOVER_LOG"
     exit 0
     ;;
@@ -292,6 +332,38 @@ PY
     FINAL=0
     WATCH_PANE=$pane WATCH_OLD=$old
     trap watchdog_exit EXIT
+
+    # --- phase 0: wait for the foreground call to finish ------------------------------
+    # THE root cause of the 2026-08-27 stalls. `herdr pane send-keys <own-pane> Escape`
+    # reaches Claude Code as "interrupt the running tool", and the running tool was the
+    # Bash call carrying the foreground half of this script: the pane showed
+    # `Bash interrupted`, nothing was ever armed, and the instance sat idle with no
+    # watchers for hours. Every keystroke below therefore waits until that pid is gone.
+    # Without --parent the wait is skipped, which is how a test drives `watch` directly.
+    if [ -n "${OPT_PARENT:-}" ]; then
+      pdead=$(( $(date +%s) + PARENT_TIMEOUT ))
+      while kill -0 "$OPT_PARENT" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$pdead" ]; then
+          rlog GIVE-UP "the foreground rollover (pid $OPT_PARENT) was still alive after ${PARENT_TIMEOUT}s; no keystroke was sent"
+          rtoast "shepherd context rollover FAILED" "The rollover call never finished on $pane. Nothing was cleared. Type: $msg"
+          FINAL=1; exit 5
+        fi
+        sleep 1
+      done
+      rlog HANDOFF "foreground pid $OPT_PARENT exited; settling ${HANDOFF}s before the first keystroke"
+      [ "$HANDOFF" = 0 ] || sleep "$HANDOFF"
+    fi
+
+    # --- phase 0b: force prompt mode, prove it left, then submit the /clear ------------
+    # This is the first thing that touches the pane, and it happens with no tool call of
+    # shepherd's own left running. The refusal still lands before the /clear goes out.
+    if ! prompt_mode_ok "$pane"; then
+      rlog REFUSED "pane=$pane prompt box is still in bash mode after Escape; a /clear there would run as a shell command"
+      rtoast "shepherd context rollover REFUSED" "The input box on $pane will not leave bash mode. Nothing was cleared."
+      FINAL=1; exit 2
+    fi
+    rlog CLEAR-SENT "pane=$pane box=$BOX_STATE submitting /clear"
+    herdr agent prompt "$pane" "/clear" >/dev/null 2>&1 || true
 
     # --- phase 1: did the /clear actually take? ---------------------------------------
     deadline=$(( $(date +%s) + CLEAR_TIMEOUT ))

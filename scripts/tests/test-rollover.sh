@@ -120,12 +120,20 @@ run() {
   SHEPHERD_ROLLOVER_POLL=1 SHEPHERD_ROLLOVER_CLEAR_TIMEOUT=3 \
   SHEPHERD_ROLLOVER_SETTLE=0 SHEPHERD_ROLLOVER_VERIFY=2 SHEPHERD_ROLLOVER_ATTEMPTS=2 \
   SHEPHERD_ROLLOVER_ESCAPE_SETTLE=0 \
+  SHEPHERD_ROLLOVER_HANDOFF="${HANDOFF_OVERRIDE:-0}" \
+  SHEPHERD_ROLLOVER_PARENT_TIMEOUT="${PARENT_TIMEOUT_OVERRIDE:-3}" \
   SHEPHERD_ROLLOVER_PROJECTS="${PROJECTS_OVERRIDE:-$HERDR_STUB_DIR/projects}" \
   SHEPHERD_ROLLOVER_LOG="$LOG" \
   bash "$SCRIPT" "$@" --log "$LOG" >/dev/null 2>&1
 }
 
-MSG="Run session-start recovery per CLAUDE.md section 8 and report status to the operator."
+# The recovery line the watchdog types into the fresh session. One word, and a
+# word Claude Code resolves deterministically: the repo's own `.claude/skills/`
+# entries are user-invocable as `/<name>`, so `/wake` reaches the wake skill
+# without the fresh session reading anything first. T-0187 shortened it from a
+# sentence of prose; the script now carries it as a default, so the command a
+# shepherd turn actually types is `context-rollover.sh rollover` and nothing else.
+MSG="/wake"
 
 # === F1: the clear never lands — this is the failure that used to be silent ==
 scene SID-OLD working "❯" never
@@ -174,15 +182,65 @@ assert_ok "the give-up raises a toast" grep -q 'notification show' "$CALLS"
 assert_eq "the stub always claims success" \
   "$(PATH="$BIN:$PATH" herdr agent prompt w1:p1 anything | grep -c agent_prompted)" "1"
 
-# === F6: preflight forces prompt mode before submitting anything ============
+# === F6: THE FOREGROUND SENDS NO KEYSTROKE ==================================
+# The 2026-08-27 root cause, asserted so it cannot come back. The old shape sent
+# `pane send-keys <own-pane> Escape` from the foreground, while that foreground
+# was running as the shepherd's own Bash tool call. Claude Code reads an Escape
+# into its pane as "interrupt the running tool" — and the running tool was this
+# script. The pane showed `Bash interrupted`, nothing was armed, and the
+# instance sat idle with no watchers for hours. The foreground is read-only now:
+# it may call `pane get` and `pane read`, and nothing else.
 scene SID-OLD working "!" now
-run rollover "$MSG" --pane w1:p1
-assert_eq "a box that comes clean after Escape arms" "$?" "0"
-assert_ok "Escape is sent"         grep -q 'pane send-keys w1:p1 Escape' "$CALLS"
-assert_ok "the clear is submitted" grep -q 'agent prompt w1:p1 /clear'   "$CALLS"
-assert_ok "arming is logged"       grep -q ' ARM '                       "$LOG"
+HANDOFF_OVERRIDE=30 run rollover "$MSG" --pane w1:p1
+assert_eq "a read-only foreground arms and exits 0" "$?" "0"
+assert_ok "arming is logged"          grep -q ' ARM '        "$LOG"
+assert_ok "the observed box is logged" grep -q 'box_before=' "$LOG"
+assert_ok "the armed watchdog is told which pid to outlive" grep -q 'parent=' "$LOG"
+assert_fail "the foreground sends no keystroke" \
+  grep -q 'pane send-keys' "$CALLS"
+assert_fail "the foreground submits no prompt" \
+  grep -q 'agent prompt' "$CALLS"
+# Structural, because a future edit that moves either call back into the
+# foreground would pass every behavioural case above on a fast machine.
+fg=$(sed -n '/^  rollover)/,/^  watch)/p' "$SCRIPT")
+assert_fail "the rollover branch carries no send-keys call" \
+  grep -q 'send-keys' <<<"$fg"
+assert_fail "the rollover branch carries no agent prompt call" \
+  grep -q 'agent prompt' <<<"$fg"
 
-# === F6b: a SUGGESTED prompt in the box must not hold the rollover ===========
+# === F6a: the watchdog waits for the foreground pid before touching anything =
+# `watch --parent <live pid>` must send nothing while that pid lives, and must
+# give up loudly rather than send anyway.
+scene SID-OLD working "❯" now
+sleep 30 &
+LIVE=$!
+run watch w1:p1 SID-OLD "$MSG" --parent "$LIVE"
+assert_eq "a foreground that never exits gives up with 5" "$?" "5"
+kill "$LIVE" 2>/dev/null
+assert_ok "the give-up names the pid it waited on" grep -q "$LIVE" "$LOG"
+assert_ok "the give-up raises a toast" grep -q 'notification show' "$CALLS"
+assert_fail "and it sent no keystroke"  grep -q 'pane send-keys' "$CALLS"
+assert_fail "and it submitted no clear" grep -q 'agent prompt w1:p1 /clear' "$CALLS"
+
+# A parent already gone hands over immediately and proceeds.
+scene SID-OLD working "❯" now
+sleep 0.1 &
+DEAD=$!
+wait "$DEAD" 2>/dev/null
+run watch w1:p1 SID-OLD "$MSG" --parent "$DEAD"
+assert_eq "a foreground already gone lets the watchdog run" "$?" "0"
+assert_ok "the handover is logged" grep -q ' HANDOFF ' "$LOG"
+assert_ok "and only then is Escape sent" grep -q 'pane send-keys w1:p1 Escape' "$CALLS"
+
+# === F6b: the watchdog forces prompt mode, then submits the clear ============
+scene SID-OLD working "!" now
+run watch w1:p1 SID-OLD "$MSG"
+assert_eq "a box that comes clean after Escape recovers" "$?" "0"
+assert_ok "Escape is sent by the watchdog" grep -q 'pane send-keys w1:p1 Escape' "$CALLS"
+assert_ok "the clear is submitted"         grep -q 'agent prompt w1:p1 /clear'   "$CALLS"
+assert_ok "the clear is logged as sent"    grep -q ' CLEAR-SENT '                "$LOG"
+
+# === F6c: a SUGGESTED prompt in the box must not hold the rollover ===========
 # Measured live 2026-08-25: a pane whose box read
 #   "❯  I need a task description to suggest your next step."
 # accepted /clear normally and its session id moved — the suggestion is ghost
@@ -192,7 +250,7 @@ assert_ok "arming is logged"       grep -q ' ARM '                       "$LOG"
 # draft that did break the clear is caught loudly by the session-id gate.
 scene SID-OLD working "❯  I need a task description to suggest your next step." now
 touch "$HERDR_STUB_DIR/stuck"        # Escape leaves it exactly as it is
-run rollover "$MSG" --pane w1:p1
+run watch w1:p1 SID-OLD "$MSG"
 assert_eq "a suggested prompt does not hold the rollover" "$?" "0"
 assert_ok "the clear is still submitted" grep -q 'agent prompt w1:p1 /clear' "$CALLS"
 assert_ok "and the box state is logged for diagnosis" grep -q 'box=other' "$LOG"
@@ -200,7 +258,7 @@ assert_ok "and the box state is logged for diagnosis" grep -q 'box=other' "$LOG"
 # === F7: a box that will not leave bash mode refuses, and submits nothing ====
 scene SID-OLD working "!" now
 touch "$HERDR_STUB_DIR/stuck"
-run rollover "$MSG" --pane w1:p1
+run watch w1:p1 SID-OLD "$MSG"
 assert_eq "a box stuck in bash mode refuses" "$?" "2"
 assert_ok "the refusal is logged"     grep -q ' REFUSED '                 "$LOG"
 assert_ok "the refusal toasts"        grep -q 'notification show'         "$CALLS"
@@ -278,10 +336,12 @@ assert_ok "the warning names the new script" \
 # The verb map, proven by a side effect only `rollover` produces: an unmapped
 # `recycle` would reach the new script as an unknown subcommand and exit 1.
 scene SID-OLD working "❯" now
-SCRIPT="$SHIM" run recycle "$MSG" --pane w1:p1
+SCRIPT="$SHIM" HANDOFF_OVERRIDE=30 run recycle "$MSG" --pane w1:p1
 assert_eq "the shim maps recycle to rollover" "$?" "0"
-assert_ok "and the rollover armed"          grep -q ' ARM '                     "$LOG"
-assert_ok "and the clear was submitted"     grep -q 'agent prompt w1:p1 /clear' "$CALLS"
+assert_ok "and the rollover armed"      grep -q ' ARM '        "$LOG"
+assert_ok "and the watchdog got a parent to outlive" grep -q 'parent=' "$LOG"
+assert_fail "and the shim's foreground sent no keystroke either" \
+  grep -q 'pane send-keys' "$CALLS"
 
 # The old env var still steers the log for one release.
 scene SID-OLD working "❯" never
@@ -304,5 +364,46 @@ assert_fail "the new script carries no recycle vocabulary" \
   grep -qi 'recycl' "$SCRIPT"
 assert_ok "the new script answers the rollover verb" \
   grep -q '^  rollover)' "$SCRIPT"
+
+# === F15: the recovery message defaults, so the typed command is bare ========
+# T-0187. Two rollover attempts on 2026-08-27 were interrupted at the tool call
+# — first under the old script name, then under the new name carrying a
+# sentence of prose. Whatever reads that command line, the smallest surface it
+# can read is the one with no argument at all. The default lives in the script,
+# so `context-rollover.sh rollover` is the whole invocation and every caller
+# gets the same recovery line for free.
+assert_ok "the script carries a default recovery message" \
+  grep -q 'ROLLOVER_MSG:-/wake' "$SCRIPT"
+assert_ok "the default is one word, slash-prefixed, no prose" \
+  bash -c 'grep -oE "ROLLOVER_MSG:-[^}]*" "$1" | grep -qE "^ROLLOVER_MSG:-/[a-z]+$"' _ "$SCRIPT"
+
+scene SID-OLD working "❯" now
+HANDOFF_OVERRIDE=30 run rollover --pane w1:p1
+assert_eq "rollover with no message still arms" "$?" "0"
+assert_ok "the default message is what got armed" grep -q 'msg=/wake' "$LOG"
+assert_fail "and it still sent no keystroke" grep -q 'pane send-keys' "$CALLS"
+
+# End to end on the default: the watchdog must prompt the fresh session with
+# the same string the arming line logged, or a rollover recovers into silence.
+scene SID-OLD working "❯" now
+run watch w1:p1 SID-OLD "/wake"
+assert_eq "the default message verifies end to end" "$?" "0"
+assert_ok "the fresh session is prompted with /wake" \
+  grep -q 'agent prompt w1:p1 /wake' "$CALLS"
+
+# A missing pane is still a refusal — the default covers the message only.
+scene SID-OLD working "❯" now
+HERDR_PANE_ID= run rollover
+assert_eq "rollover with no pane still refuses" "$?" "2"
+assert_ok "the refusal is logged"     grep -q ' REFUSED '                 "$LOG"
+assert_fail "no /clear was submitted" grep -q 'agent prompt w1:p1 /clear' "$CALLS"
+
+# === F16: the wake skill is what the recovery message invokes ===============
+# The message is only as good as the thing it reaches. If the skill directory
+# is gone, `/wake` is an unknown slash command and the fresh session stands up
+# with no procedure at all — a rollover that reports success and recovers
+# nothing.
+assert_file "the wake skill the message invokes exists" \
+  "$HERE/../../.claude/skills/wake/SKILL.md"
 
 finish
