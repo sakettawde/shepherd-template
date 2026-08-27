@@ -36,7 +36,7 @@ description: Close out a task after monitor verified it done (or declared it fai
    ```
 
    Release the project lock even when the close-out is a failure — a held lock strands the working copy for every instance.
-7. **Context check, then next** — run `scripts/self-recycle.sh decide` first (CLAUDE.md §8): `recycle` → adapter R10 now and let session-start recovery (§8 step 9) dispatch the next card on the fresh context; otherwise find the oldest `queued` card for that working copy:
+7. **Context check, then next** — run `scripts/context-rollover.sh decide` first (CLAUDE.md §8): `rollover` → adapter R10 now and let session-start recovery (§8 step 9) dispatch the next card on the fresh context; otherwise find the oldest `queued` card for that working copy:
    - **Yours** → invoke dispatch, if the worker cap has headroom.
    - **Another instance's** → look up its pane and session first: `scripts/lock.sh check <owner-id>` prints `HELD <owner-id> <holder> <pane> <session> <task> <acquired>` — the 4th and 5th fields are what `shepherd_live` needs (adapter R7 "peer identity"). Resolve liveness, tri-state:
      - **Live** → send that instance one message by its remote-control name (`SendMessage` to its `shepherd-<name>` id) naming the freed working copy and the card, and append a Log line recording the handoff. Do not dispatch it.

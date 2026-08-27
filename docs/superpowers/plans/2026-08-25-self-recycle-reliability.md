@@ -1,5 +1,10 @@
 # Self-Recycle Reliability Implementation Plan
 
+> **Historical (T-0166).** Names here are the ones in use on 2026-08-25 and are kept as
+> written. T-0185 renamed the script to `scripts/context-rollover.sh`, its verb to
+> `rollover`, its env prefix to `SHEPHERD_ROLLOVER_*`, and the spec to
+> `docs/specs/context-rollover-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rebuild shepherd's `/clear` → recovery path so that it either completes unattended or reports its failure to the operator within a minute, never neither.

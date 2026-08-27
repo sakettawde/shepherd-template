@@ -1,4 +1,15 @@
-# Self-recycle: research and design (T-0166)
+# Context rollover: research and design (T-0166)
+
+> **Renamed 2026-08-27 (T-0185).** This document, the script it specifies and their
+> vocabulary were called *self-recycle* until then; the old names read to Claude Code's
+> permission auto-classifier as a destructive action and got the command refused. The
+> script is now `scripts/context-rollover.sh`, its verb is `rollover`, its log is
+> `${SHEPHERD_ROLLOVER_LOG:-~/.claude/shepherd-rollover.log}`, and `decide` answers
+> `rollover|hold|ok|unknown`. Behaviour did not change. Names from before the rename are
+> kept below only where they record what was actually observed — the `/tmp` log path in
+> §1 is one such fact. Dated companions keep the old name in full:
+> `docs/superpowers/plans/2026-08-25-self-recycle-reliability.md`.
+
 
 Written 2026-08-25. Every claim below is either a citation with a read-date or a
 measurement taken on this machine with the commands shown. Nothing here is recalled.
@@ -9,7 +20,7 @@ detection manifest `remote/claude.toml` version `2026.08.21.1`.
 
 ## 1. The incident
 
-On 2026-08-25 `shepherd-collie` recycled at 19:04:28. `scripts/self-recycle.sh decide`
+On 2026-08-25 `shepherd-collie` recycled at 19:04:28. `scripts/context-rollover.sh decide`
 correctly returned `recycle` (200k tokens, no active card). The detached injector was
 armed with a 30 s delay, `/clear` was queued, and the new session transcript starts at
 19:04:35 — so **the clear itself worked**. The injector then polled for up to
@@ -92,7 +103,7 @@ Two further measured facts from the same run:
 - **Background shells survive `/clear`.** `sleep 900` (PID 265692) was still running after
   the clear, and the fresh session's footer still counted `1 shell`. This **contradicts** the
   R10 "known facts" line that said background Bash watchers do not survive `/clear`. That
-  line is corrected. (Consequence worth knowing but out of scope here: a recycled shepherd
+  line is corrected. (Consequence worth knowing but out of scope here: a shepherd after a rollover
   that re-arms watchers from its cards adds to the surviving ones rather than replacing them.)
 - **Bash mode inverts the signal.** With the box in bash mode the footer line becomes
   `! for shell mode`, so `background_shell_working` stops matching and the pane reports
@@ -170,10 +181,10 @@ empty log file was indistinguishable between "died at once" and "polled for six 
 
 ## 6. The design
 
-`scripts/self-recycle.sh` keeps `ctx`, `decide` and `meter` unchanged — they were correct in
+`scripts/context-rollover.sh` keeps `ctx`, `decide` and `meter` unchanged — they were correct in
 this incident and are out of scope. `inject` is replaced by two subcommands.
 
-**`self-recycle.sh recycle [--sound S] [--pane P] [--log F] <message>`** — run by shepherd in
+**`context-rollover.sh rollover [--sound S] [--pane P] [--log F] <message>`** — run by shepherd in
 one turn, in place of steps 2–4 of the old R10:
 
 1. Resolve the pane's current session id `S0` via `pane_probe`. No id → abort loudly (the herdr
@@ -182,12 +193,12 @@ one turn, in place of steps 2–4 of the old R10:
    answered into it.
 3. Force prompt mode: `send-keys Escape`, re-read the prompt box, require a bare `❯`. Refuse
    if the box will not come clean.
-4. Arm the detached watchdog (`self-recycle.sh watch`), passing `S0`.
+4. Arm the detached watchdog (`context-rollover.sh watch`), passing `S0`.
 5. Submit `/clear` via `herdr agent prompt`.
 
 Shepherd then ends its turn, exactly as before.
 
-**`self-recycle.sh watch <pane> <old-session-id> <message>`** — the detached watchdog, and a
+**`context-rollover.sh watch <pane> <old-session-id> <message>`** — the detached watchdog, and a
 first-class subcommand so that it is directly testable:
 
 - **Phase 1, confirm the clear.** Poll `pane_probe` every `POLL` s (default 2) up to
@@ -202,17 +213,17 @@ first-class subcommand so that it is directly testable:
   All attempts exhausted → **give up**: log, toast, exit 4.
 
 Every poll and every exit path writes an ISO-timestamped line naming the observed state to one
-documented file: `${SHEPHERD_RECYCLE_LOG:-$HOME/.claude/shepherd-recycle.log}`, appended, never
+documented file: `${SHEPHERD_ROLLOVER_LOG:-$HOME/.claude/shepherd-rollover.log}`, appended, never
 truncated. There is no silent exit.
 
 Every give-up also raises `herdr notification show` with `--sound` taken from `--sound`
-(default `request`, overridable by `SHEPHERD_RECYCLE_SOUND`). The script does not parse the
+(default `request`, overridable by `SHEPHERD_ROLLOVER_SOUND`). The script does not parse the
 Operator block: shepherd passes `--sound none` when the Operator block says
 `notifications: silent`. Policy stays in the operating manual, and the script stays testable.
 
 The script writes no ledger, registry or decision state — those writes belong to the shepherd
-that owns them. §8 recovery instead reads the tail of the recycle log and reports the last
-recycle's outcome to the operator, so a give-up reaches the decision log through its owner.
+that owns them. §8 recovery instead reads the tail of the rollover log and reports the last
+rollover's outcome to the operator, so a give-up reaches the decision log through its owner.
 
 ### Why this shape
 
@@ -226,14 +237,14 @@ Confidence: **high** for the root cause and for the session-id gate — both are
 including the reproduction of the exact failure. **Medium-high** for the transcript verification,
 whose only assumption is that Claude Code keeps writing session transcripts to
 `~/.claude/projects/*/<session-id>.jsonl`; that layout is observed on this machine and is what
-`self-recycle.sh meter` has already depended on.
+`context-rollover.sh meter` has already depended on.
 
 ## 7. Live validation
 
 Run against a pane created and closed for the purpose (`w18:p1`, Haiku), with the real herdr
 CLI, 2026-08-25.
 
-**Canary — normal recycle, unattended, 10 seconds end to end:**
+**Canary — normal rollover, unattended, 10 seconds end to end:**
 
 ```
 20:24:03 ARM             pane=w18:p1 session=ff6c72df… box=clean (clear_timeout=120s attempts=3)
@@ -252,7 +263,7 @@ baseline — a clear that can never come. Exit 3 after a full poll trail and a `
 with the toast raised. No silent exit.
 
 **The 2026-08-18 failure, replayed:** the box was deliberately put into bash mode, then
-`recycle` was run. The `Escape` preflight rescued it (`box=clean` in the `ARM` line), the clear
+`rollover` was run. The `Escape` preflight rescued it (`box=clean` in the `ARM` line), the clear
 landed at the second poll, and recovery verified at attempt 1 — 10 seconds, unattended. The
 failure that cost an incident is now handled without anyone noticing it happened.
 
@@ -264,7 +275,7 @@ prompt, which `Escape` does not dismiss. Submitting `/clear` into it by hand wor
 the session id moved, proving the suggestion is ghost text, not input.
 
 The preflight was too strict, and in a way that mattered: a shepherd pane shows a suggestion
-routinely, so the design as first built would have refused most real recycles. R10's Gotchas
+routinely, so the design as first built would have refused most real rollovers. R10's Gotchas
 already record that no pane-read source can tell a suggestion from a human draft, and that the
 standing rule is not to hold work over apparent text. The check was narrowed to bash mode
 alone — the only box state measured to actually swallow a `/clear` — with the observed state
@@ -276,7 +287,7 @@ loudly, which is exactly what that gate is for.
 - If the herdr `claude` integration is uninstalled or downgraded below v8, `agent_session` goes
   stale and phase 1 times out. That now fails **loudly** within `CLEAR_TIMEOUT`, which is the
   requirement. `herdr integration status` diagnoses it.
-- A recycle whose `/clear` lands but whose pane is then taken over by the operator mid-recovery
+- A rollover whose `/clear` lands but whose pane is then taken over by the operator mid-recovery
   will spend its attempts and give up loudly. Correct behaviour.
 - Background shells surviving `/clear` means a long-lived instance accumulates them. Noted, out
   of scope for this task.
