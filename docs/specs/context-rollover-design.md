@@ -291,3 +291,43 @@ loudly, which is exactly what that gate is for.
   will spend its attempts and give up loudly. Correct behaviour.
 - Background shells surviving `/clear` means a long-lived instance accumulates them. Noted, out
   of scope for this task.
+
+## 8. Validation: what interrupts the rollover (T-0187, 2026-08-27)
+
+**Verdict: the rollover interrupted its own tool call.** In `scripts/context-rollover.sh`
+as of `ad7c581`, line 161 (`prompt_mode_ok`) ran `herdr pane send-keys <pane> Escape` against the
+shepherd's **own** pane, from the **foreground**, while that foreground was still
+running as the shepherd's Bash tool call. Claude Code reads an Escape into its pane as
+*interrupt the running tool*, and the running tool was this very script. The pane showed
+`Bash interrupted`; the script died before it armed the watchdog (line 271) and before
+it submitted the `/clear` (line 274); the instance then sat idle with no watchers for
+hours. The operator confirmed the pane showed only `Bash interrupted`.
+
+Two earlier theories are ruled out. It was not the auto-mode classifier: a classifier
+block is listed in `/permissions` under **Recently denied**
+([auto mode config](https://code.claude.com/docs/en/auto-mode-config), read 2026-08-27),
+and that tab was empty after both calls. It was not a permission prompt on an unmatched
+command either — the pane carried no prompt, only the interrupt. Both theories fitted
+the tool-result text and neither fitted the pane. The pane was the evidence that
+settled it.
+
+**The fix, and the invariant it establishes.** The foreground is now read-only: it calls
+`pane get` and `pane read`, logs the box state it observed, arms the detached watchdog
+with its own pid, prints, and exits inside a second. Every keystroke — `Escape`, the
+bash-mode read-back, `/clear`, the recovery prompt — is sent by the watchdog, which
+polls until that pid is gone and then settles (`SHEPHERD_ROLLOVER_HANDOFF`, 5s) before
+the first one. Every refusal path and every log line survives the move; the bash-mode
+refusal now lands in the watchdog, still before the `/clear` goes out, and exit `5` is
+new for a foreground that never finished. `test-rollover.sh` asserts the invariant both
+behaviourally and structurally: the `rollover` branch of the script contains no
+`send-keys` and no `agent prompt` call at all.
+
+The `wake` skill and the one-word `/wake` message shipped alongside this finding are
+**simplifications, not the fix** — the command was never blocked for what it said.
+
+**Standing risk, named.** Auto mode does block *"sending keystrokes to Claude Code's own
+tmux pane to drive its own interface"* by default
+([permission modes](https://code.claude.com/docs/en/permission-modes), read 2026-08-27).
+It did not fire here, but a rollover is exactly that shape, and the keystrokes now come
+from a detached process outside any tool call — where a `PermissionDenied` would be
+invisible. The watchdog's own log and toast are what make that case loud.

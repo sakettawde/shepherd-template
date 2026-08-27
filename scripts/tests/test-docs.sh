@@ -184,4 +184,99 @@ assert_ok "onboard's status block points back at the canonical rule" \
 assert_ok "onboard covers pauses its own two lines do not name" \
   grep -q 'any other pause' <<<"$onboard_proto"
 
+# --- the wake skill carries §8's session-start procedure (T-0187) -----------
+# §8 kept ten numbered steps inline, and every fresh session after a context
+# rollover re-derived them from prose. The procedure now lives in one skill the
+# recovery message invokes by name; §8 keeps the rules. Both halves are
+# asserted, because either half alone is a recovery that skips something.
+WAKE="$ROOT/.claude/skills/wake/SKILL.md"
+assert_file "the wake skill exists" "$WAKE"
+assert_ok "the wake skill declares its name" grep -q '^name: wake$' "$WAKE"
+assert_ok "the wake skill front-loads its trigger" \
+  grep -qi '^description:.*session start' "$WAKE"
+
+# Ten steps, numbered 1..10 with no gaps. A dropped step is a sweep that never
+# runs or a watcher that never re-arms, and nothing else in the system notices.
+nums=$(grep -oE '^### [0-9]+\.' "$WAKE" | grep -oE '[0-9]+')
+assert_eq "the wake skill carries ten steps, numbered 1..10" \
+  "$(printf '%s\n' "$nums")" "$(seq 1 10)"
+
+# Each step's actual command, named. A skill that describes a sweep without
+# naming the script leaves the fresh session to guess the invocation.
+for c in 'herdr --version' \
+         'shepherd-identity.sh acquire' \
+         'lock.sh sweep' \
+         'reserve-task-id.sh sweep' \
+         'lock.sh takeover' \
+         'context-rollover.sh decide'; do
+  assert_ok "the wake skill names \`$c\`" grep -qF "$c" "$WAKE"
+done
+
+# The rules stay in CLAUDE.md; the skill cites them rather than restating them.
+assert_ok "the wake skill cites CLAUDE.md §8 as the rules home" \
+  grep -q 'CLAUDE.md §8' "$WAKE"
+# Thresholds have exactly one home (§8). A second copy drifts, and the copy a
+# fresh session reads first is the one that decides whether it rolls over.
+assert_fail "the wake skill does not restate the rollover thresholds" \
+  grep -qE '200k|350k|60 ?%|85 ?%' "$WAKE"
+
+assert_ok "CLAUDE.md §8 sends session start to the wake skill" \
+  grep -q '`wake` skill' "$ROOT/CLAUDE.md"
+
+# --- one recovery message, on every surface that quotes it ------------------
+# The watchdog proves recovery by grepping the fresh session's transcript for
+# this exact string (context-rollover.sh verify_prompt). A surface quoting a
+# different one either reports a rollover that never recovered, or recovers a
+# session that then does nothing.
+# The prose surfaces quote it as a code span; the script carries it as the
+# default. Both are matched literally — a bare `/wake` also matches the word
+# "tasks/wakes" in R10's meter paragraph, which is not a quotation of anything.
+assert_ok "the script carries the message as its default" \
+  grep -qF 'ROLLOVER_MSG:-/wake' "$ROOT/scripts/context-rollover.sh"
+assert_ok "the test pins the same message" \
+  grep -qF 'MSG="/wake"' "$ROOT/scripts/tests/test-rollover.sh"
+for f in CLAUDE.md \
+         .claude/skills/herdr-adapter/references/v0.8.2.md \
+         docs/specs/context-rollover-design.md; do
+  assert_ok "the recovery message is \`/wake\` in $f" grep -qF '`/wake`' "$ROOT/$f"
+done
+
+# The prose it replaced is gone from every surface that INVOKES it. The spec
+# may still quote it as history — that is the record of what was interrupted.
+for f in scripts/context-rollover.sh \
+         scripts/tests/test-rollover.sh \
+         CLAUDE.md \
+         .claude/skills/herdr-adapter/references/v0.8.2.md; do
+  assert_fail "the long recovery prompt is gone from $f" \
+    grep -qF 'Run session-start recovery per CLAUDE.md section 8' "$ROOT/$f"
+done
+
+# --- the spec records what actually interrupts a rollover -------------------
+# Two attempts on 2026-08-27 died at the tool call and the cause was guessed at
+# twice. The section is asserted so the next guess has to displace a written
+# runbook rather than an absence.
+# --- the foreground rollover call touches nothing (T-0187) ------------------
+# Root cause of the 2026-08-27 stalls: the foreground sent `pane send-keys
+# <own-pane> Escape` while running as the shepherd's own Bash tool call, Claude
+# Code read the Escape as "interrupt the running tool", and the script died
+# before it armed anything. The behaviour is asserted in test-rollover.sh; what
+# is asserted here is that both surfaces a shepherd actually reads say so, so
+# nobody reintroduces the shape from the prose.
+R10=$(sed -n '/^## R10 /,/^## New in/p' "$ROOT/.claude/skills/herdr-adapter/references/v0.8.2.md")
+assert_ok "R10 says the foreground call is read-only" \
+  grep -qi 'read-only' <<<"$R10"
+assert_ok "R10 names the interrupt-your-own-tool failure" \
+  grep -qi 'interrupt' <<<"$R10"
+assert_ok "CLAUDE.md §8 says the keystrokes come from the detached watchdog" \
+  grep -qi 'detached watchdog' "$ROOT/CLAUDE.md"
+
+SPEC="$ROOT/docs/specs/context-rollover-design.md"
+assert_ok "the spec has a validation section" \
+  grep -q '^## 8. Validation: what interrupts the rollover' "$SPEC"
+val=$(sed -n '/^## 8. Validation: what interrupts the rollover/,$p' "$SPEC")
+assert_ok "the validation names the observable that settled it" \
+  grep -qi 'Recently denied' <<<"$val"
+assert_ok "the validation cites its source" \
+  grep -qF 'code.claude.com/docs' <<<"$val"
+
 finish
