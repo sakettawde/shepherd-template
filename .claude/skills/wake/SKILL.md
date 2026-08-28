@@ -162,8 +162,9 @@ rollover failed: report it to the operator and log it to
 write ledger state. A `VERIFIED` tail is how a session that followed a **successful**
 rollover confirms itself.
 
-Then confirm peers can reach you. `ListAgents` opens with this session's own name — the
-name other sessions address it by — and it must read your `SHEPHERD_ID`. A
+Then confirm peers can reach you — this check is about being *reached*, not about
+sending, which works under any name. `ListAgents` opens with this session's own name —
+the name other sessions address it by — and it must read your `SHEPHERD_ID`. A
 `<clone-directory>-<two characters>` name instead means this session launched without
 `-n` (CLAUDE.md §1), so every handoff aimed at your id lands nowhere (§4a): ask the
 operator to type `/rename <your SHEPHERD_ID>` in this pane, and report it. The check
