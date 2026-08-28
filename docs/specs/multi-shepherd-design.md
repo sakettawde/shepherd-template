@@ -46,7 +46,7 @@ Everything below exists to make that claim race-free and crash-safe.
 ### 3.1 Launch
 
 ```bash
-cd <shepherd-root> && SHEPHERD_ID=shepherd-1 claude --remote-control shepherd-1
+cd <shepherd-root> && SHEPHERD_ID=shepherd-1 claude -n shepherd-1 --remote-control shepherd-1
 ```
 
 - `SHEPHERD_ID` is the source of truth. Nothing is auto-numbered or inferred.
@@ -58,7 +58,10 @@ cd <shepherd-root> && SHEPHERD_ID=shepherd-1 claude --remote-control shepherd-1
   reported `UNKNOWN-LOCK` and never cleaned up. The character class is what rejects
   whitespace, shell metacharacters and path traversal — an id containing `/` once
   wrote its lock outside `ledger/locks/`, where the sweep could never find it.
-- The `--remote-control` name must equal the id. §5.4 addresses peers by that name.
+- `-n` and `--remote-control` both take the id. `-n` sets the display name, which is the
+  address §5.3 sends a handoff to; `--remote-control` titles the session in the Claude
+  apps and sets nothing locally ([Manage sessions](https://code.claude.com/docs/en/sessions),
+  [CLI reference](https://code.claude.com/docs/en/cli-reference), read 2026-08-28).
 
 ### 3.2 The identity lock
 
@@ -260,12 +263,15 @@ Owner-filtered dispatch needs a wake source, or queues starve. At retro step 6, 
 
 1. Find the oldest `state: queued` card for that working copy.
 2. If it is mine → dispatch as usual.
-3. If it belongs to another **live** instance → notify that instance by its remote-control name
-   (`SendMessage` to `shepherd-2`), and append a Log line recording the handoff.
+3. If it belongs to another **live** instance → notify that instance by its shepherd id
+   (`SendMessage` to `shepherd-2`, once `ListAgents` shows that id live), and append a Log line
+   recording the handoff.
 4. If it belongs to a **gone** instance → report it to the operator in one line as awaiting
    reassignment (§10). Do not take it unilaterally.
 
-Peer sessions are addressable by their remote-control name.
+Peer sessions are addressable by the display name they launched with — their shepherd id, per
+§3.1's `-n`. An instance running under an auto name answers to no id and is unreachable until it
+is renamed.
 
 ### 5.4 If the notification fails
 
