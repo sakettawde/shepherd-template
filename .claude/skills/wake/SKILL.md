@@ -1,6 +1,6 @@
 ---
 name: wake
-description: Session start and recovery for a shepherd instance. Use as the first act of every fresh session — after a context rollover clears the pane, after a restart, after a crash — and whenever you are unsure what you still own. Runs CLAUDE.md §8's ten ordered steps: version gate, identity, both sweeps, active cards, self-reconcile, pane check, watcher re-arm, queue check, context check, and the one-line status to the operator.
+description: Session start and recovery for a shepherd instance. Use as the first act of every fresh session — after a context rollover clears the pane, after a restart, after a crash — and whenever you are unsure what you still own. Runs CLAUDE.md §8's ten ordered steps: version gate, identity, both sweeps, active cards, self-reconcile, pane check, watcher re-arm, queue check, and a closing step that covers context, reachability and the one-line status to the operator.
 ---
 
 # wake
@@ -144,7 +144,7 @@ As `shepherd-1`, add the cards carrying no `owner:` line at all
 `state: queued` alone is not "dispatchable by you". Hand the result to the **dispatch**
 skill, subject to `worker-cap`.
 
-### 10. Context check, rollover log, status
+### 10. Context check, rollover log, reachability, status
 
 ```bash
 scripts/context-rollover.sh decide
@@ -162,6 +162,15 @@ rollover failed: report it to the operator and log it to
 write ledger state. A `VERIFIED` tail is how a session that followed a **successful**
 rollover confirms itself.
 
+Then confirm peers can reach you. `ListAgents` opens with this session's own name — the
+name other sessions address it by — and it must read your `SHEPHERD_ID`. A
+`<clone-directory>-<two characters>` name instead means this session launched without
+`-n` (CLAUDE.md §1), so every handoff aimed at your id lands nowhere (§4a): ask the
+operator to type `/rename <your SHEPHERD_ID>` in this pane, and report it. The check
+belongs at every wake rather than only after a restart, because accepting a plan also
+replaces the name in those listings ([Manage sessions](https://code.claude.com/docs/en/sessions)
+§ "Name your sessions", read 2026-08-28).
+
 Then one line to the operator, in this order: your context %, your active tasks, the
 other live instances with their active tasks, and any orphans. The live set comes from
 the identity locks — `ls ledger/locks/shepherd-*.lock`, skipping `*.reclaim.lock`, each
@@ -174,4 +183,5 @@ swept at step 3, so what remains and answers is the live set
 - Steps 1 to 10 have each run, or a hard stop at step 1 or 2 was reported to the operator.
 - Every sweep line kind that appeared has reached the operator.
 - Every active card you own holds its project lock and has one watcher armed.
+- `ListAgents` shows this session under your `SHEPHERD_ID`, or the operator has been asked to `/rename` it.
 - The operator has the one-line status.

@@ -23,13 +23,13 @@ claude
 
 Run the clone-and-launch above **from a pane inside herdr** — init-shepherd's environment gate (`HERDR_ENV`, version pin) refuses to run outside it. Then tell Claude: **run the init-shepherd skill**. It gates on the herdr version, interviews you (name, code directory, notification preferences, worker cap, shepherd-id scheme), writes the `## 0. Operator` block in `CLAUDE.md`, registers the three worker hooks in your user-global `~/.claude/settings.json`, and seeds `registry/projects.md` from your code directory.
 
-Daily launch, from a pane inside herdr — the env var and the `--remote-control` name must be the same string:
+Daily launch, from a pane inside herdr — the env var, `-n` and `--remote-control` all carry the same id:
 
 ```bash
-cd <your shepherd clone> && SHEPHERD_ID=shepherd-1 claude --remote-control shepherd-1
+cd <your shepherd clone> && SHEPHERD_ID=shepherd-1 claude -n shepherd-1 --remote-control shepherd-1
 ```
 
-A second concurrent instance launches identically with `shepherd-2`, and so on. Peers address each other by that name to hand off a freed queue, so a session launched without it — or with a name that differs from `SHEPHERD_ID` — cannot be reached.
+A second concurrent instance launches identically with `shepherd-2`, and so on. `-n` is what peers address to hand off a freed queue; `--remote-control` is what the Claude mobile and desktop apps show. A session launched without `-n` takes an auto name and no peer can reach it (CLAUDE.md §1).
 
 **Moving to a new machine:** clone your instance repo, open Claude in it, re-run init-shepherd. It re-registers hooks with the new paths and touches nothing else.
 

@@ -22,10 +22,15 @@ Reply style: one line by default; more only when reporting a completed task or e
 Canonical launch (from a pane inside herdr):
 
 ```bash
-cd <your shepherd clone> && SHEPHERD_ID=shepherd-1 claude --remote-control shepherd-1
+cd <your shepherd clone> && SHEPHERD_ID=shepherd-1 claude -n shepherd-1 --remote-control shepherd-1
 ```
 
-`SHEPHERD_ID` is who you are (§0), and **the `--remote-control` name must be the same string**. Peers address each other by that name — retro step 7's handoff `SendMessage` goes to that name, and it is what stops another instance's queue starving (§4a) — so a session launched as `--remote-control shepherd` can never be reached. The name also makes the session reachable from the Claude mobile/desktop apps. Further instances launch identically with `shepherd-2`, `shepherd-3`, and so on (§0 holds the format).
+`SHEPHERD_ID` is who you are (§0), and **all three strings are the same id**. The two flags buy different things, and only one of them makes you reachable:
+
+- **`-n shepherd-1` sets the display name, and that name is the address peers send to** — `ListAgents` lists it, `SendMessage` delivers on it, and retro step 7's handoff needs it to stop another instance's queue starving (§4a). Left unset, Claude Code names the session itself, `<working-directory>-<two characters>`, so every instance launched from one clone lists as `shepherd-4c`, `shepherd-e3`, … — telling nobody which is which, and answering to no id. Its duplicate-name protection does not cover those auto names either ([Manage sessions](https://code.claude.com/docs/en/sessions) § "Name your sessions", read 2026-08-28). `/rename shepherd-1`, typed in the pane, repairs a session already running without the flag.
+- **`--remote-control shepherd-1` titles the *remote* session** in the Claude mobile/desktop apps ([CLI reference](https://code.claude.com/docs/en/cli-reference), read 2026-08-28), and carries your identity when you message a session on another machine. It does not name you to local peers — a session launched with `--remote-control` alone is unreachable by id.
+
+Further instances launch identically with `shepherd-2`, `shepherd-3`, and so on (§0 holds the format).
 
 Pass `SHEPHERD_ID` explicitly even for `shepherd-1`: unset, it reaches `scripts/lock.sh` as an empty holder argument, which the script refuses outright rather than write a field-shifted lock line.
 
@@ -68,7 +73,7 @@ Every decision → entry in `decisions/YYYY-MM-<your-shepherd-id>.md` with Basis
 ## 4a. Multi-instance ownership
 
 - **Dispatch selection is owner-filtered.** You dispatch only cards whose `owner:` is you. Selecting owner-blind either starves another instance's card or makes you brief a card you must not watch.
-- **Handoff on release.** When you release a project lock at close-out, look at the oldest `queued` card for that working copy. Yours → dispatch it. Another instance's → resolve its liveness, tri-state (`shepherd_live`, via its identity lock's pane/session): **live** → message that instance by its remote-control name and log the handoff; **unresolved** → send that same message anyway — it costs nothing if the peer turns out gone and clears the stall if it's actually alive — then report it to the operator as unresolved; **gone** → report it to the operator as awaiting reassignment. Never take it unilaterally, in any of the three cases.
+- **Handoff on release.** When you release a project lock at close-out, look at the oldest `queued` card for that working copy. Yours → dispatch it. Another instance's → resolve its liveness, tri-state (`shepherd_live`, via its identity lock's pane/session): **live** → message that instance by its shepherd id and log the handoff; **unresolved** → send that same message anyway — it costs nothing if the peer turns out gone and clears the stall if it's actually alive — then report it to the operator as unresolved; **gone** → report it to the operator as awaiting reassignment. Never take it unilaterally, in any of the three cases.
 - **Reassignment happens only on the operator's word.** Order matters: set `owner:` on the card and commit **first**, then take the project lock, then arm the watchers. A crash between the two leaves a card you own without its lock — which session-start step 6 detects and repairs. Taking a lock a gone instance still holds is one command, never a hand-written file:
 
   ```bash
@@ -76,6 +81,7 @@ Every decision → entry in `decisions/YYYY-MM-<your-shepherd-id>.md` with Basis
   ```
 
   It resolves the current holder's liveness and writes the new line by atomic rename — never an in-place rewrite, which would let a sweeper read a truncated lock and free it. It refuses (exit 1) when the holder is live, when liveness is unresolved, and when the line changed while it was probing. Report any of those to the operator; never edit the lock file by hand.
+- **Addressing a peer.** A peer answers to its shepherd id, because §1's launch passes that id to `-n`. Confirm before you send: `ListAgents` lists every live session on this machine, and the id you are about to address must be on it. Absent → that instance is running under an auto name (launched without `-n`, or renamed since), no `SendMessage` can find it, and the handoff is the **unresolved** case above: report it to the operator, who repairs it with `/rename <id>` in that pane. The name is the whole address — Claude Code offers no session-id or socket form, and the `uds:` path attached to a message you receive is the sender's inbox socket, not a `to:` value ([Message your other Claude Code sessions](https://code.claude.com/docs/en/cross-session-messaging), read 2026-08-28).
 - **The only sanctioned write to a card you do not own** is the orphan Log line from the sweep report. It changes no field and no state.
 
 ## 5. Conventions + grep cookbook
@@ -146,7 +152,8 @@ The 0.7.4 → 0.8.2 regeneration removed the top-level `herdr wait` group — ev
 - **Session start → the `wake` skill.** Every fresh session runs it as its first act:
   after a context rollover clears the pane, after a restart, after a crash. It carries
   §8's ten ordered steps — version gate, identity, both sweeps, active cards,
-  self-reconcile, pane check, watcher re-arm, queue check, context check, status — so a
+  self-reconcile, pane check, watcher re-arm, queue check, context check, and a close that
+  covers reachability and status — so a
   session that knows nothing does not have to re-derive them. The rollover watchdog
   types `/wake` into the fresh session for exactly this reason.
 
