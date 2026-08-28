@@ -121,6 +121,11 @@ it.**
 - Card active, pane gone → mark the card `blocked` and investigate.
 - Pane alive, card `session:` missing → backfill it from `herdr pane get`
   (`agent_session`).
+- `ListAgents` lists a worker session as `worker-T-NNNN` (adapter R3), which maps it to
+  that card — a hint for matching panes to cards, never evidence: a name already live
+  comes back as a suffixed variant, and CLAUDE.md §2 rule 1 still decides what a worker
+  did ([Manage sessions](https://code.claude.com/docs/en/sessions) § "Name your
+  sessions", read 2026-08-28).
 - Card reads `pane: claiming-<your-id>` → this is a dispatch that died between claiming
   its slot and spawning the worker, not a lost pane. Put the card back to
   `state: queued` / `pane: none`, release the project lock if you hold it, commit, and
