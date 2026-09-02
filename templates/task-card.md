@@ -47,9 +47,11 @@ Project: <path>. Stack: <stack>. Dev branch: <dev-branch>. DoD command: `<cmd>`.
 - <bug tasks: a single repro command that went red on the bug and green after the fix — shepherd reruns it at verification>
 
 ### Status protocol
-End every pause and your final message with exactly one line, on a line of its own:
-`SHEPHERD: done|blocked|failed|working — <one short line>`
-Pick by what happens next. **`blocked`** — you need shepherd input to continue: a design approval, an answer, a ruling, a permission. **`working`** — you continue on your own next turn; a progress checkpoint, never terminal. `done` and `failed` end the task; `blocked` pauses it.
+End every pause and your final message with exactly one line, on a line of its own — written bare, exactly as shown here, with nothing else on the line:
+
+SHEPHERD: done|blocked|failed|working — <one short line>
+
+Emphasis and backticks around it are tolerated, so a decorated copy still records; bare is the form to write. Pick by what happens next. **`blocked`** — you need shepherd input to continue: a design approval, an answer, a ruling, a permission. **`working`** — you continue on your own next turn; a progress checkpoint, never terminal. `done` and `failed` end the task; `blocked` pauses it.
 Shepherd wakes on `blocked` within seconds and on `working` only at the next heartbeat, so an approval pause that ends `working` waits up to 30 minutes for a reply.
 
 ## Log

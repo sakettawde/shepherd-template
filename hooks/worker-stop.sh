@@ -35,7 +35,13 @@ msg = data.get("last_assistant_message") or ""
 # while its own tail ended `SHEPHERD: working`). `working` is admitted as a
 # non-terminal progress checkpoint - the R5 watcher greps only for
 # done|blocked|failed, so it never wakes shepherd.
-claims = re.findall(r"(?m)^\s*(?:\*\*)?SHEPHERD:\s*(done|blocked|failed|working)\b", msg)
+# Markdown decoration between the line start and the sentinel is skipped:
+# workers copy the line out of the card and emphasise it, and a backticked
+# `SHEPHERD: blocked` used to record "claim": "none" - so the watcher never
+# fired and the blocked worker waited for the heartbeat instead (T-0213).
+# The horizontal-whitespace classes matter: \s would let the anchor step over
+# a newline and match a claim word sitting on the following line.
+claims = re.findall(r"(?m)^[ \t]*[`*_]{0,4}SHEPHERD:[ \t]*(done|blocked|failed|working)\b", msg)
 
 line = {
     "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
