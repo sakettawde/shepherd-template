@@ -187,8 +187,21 @@ assert_eq "watch exits 3 for another instance's inbox, and arms nothing" "$?" "3
 route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
 
 route inbox_pending 401 '{"error":"unauthorized"}'
-"$SCRIPT" watch 30 >/dev/null 2>&1
-assert_eq "watch exits 1 immediately on a 401 rather than spinning" "$?" "1"
+: > "$LOG"
+start=$(date +%s)
+"$SCRIPT" watch 30 >/dev/null 2>&1; rc=$?
+elapsed=$(( $(date +%s) - start ))
+assert_eq "watch exits 1 immediately on a 401 rather than spinning" "$rc" "1"
+# rc alone passes for the wrong reason too: the consecutive-failure ceiling
+# also exits 1. HTTP_CODE only survives to the check below if the poll that
+# set it ran in cmd_watch's own shell, never inside a command substitution -
+# a regression here means the fast path is dead and every 401 is silently
+# retried ~10 times before falling through the ceiling instead. Assert the
+# fast path actually fired: exactly one request, and well under the window.
+reqs=$(grep -c '"path": "/inbox/pending"' "$LOG")
+assert_eq "a 401 makes exactly one pending request, never a retry storm" "${reqs:-0}" "1"
+assert_ok "watch exits the 401 promptly rather than spinning out its window" \
+  test "$elapsed" -lt 15
 
 # The heartbeat is the reason this loop exists at all: the Worker's canned ack
 # tells the user how long ago shepherd was online, and a heartbeat posted only
@@ -199,5 +212,12 @@ route heartbeat 200 '{"ok":true,"at":1}'
 "$SCRIPT" watch 7 >/dev/null 2>&1
 beats=$(grep -c '"path": "/heartbeat"' "$LOG")
 assert_ok "watch posts a heartbeat while it polls" test "${beats:-0}" -ge 1
+
+# pending_probe's refactor (HTTP_CODE must survive outside a subshell) must
+# not change the public CLI: `inbox.sh pending` still prints a bare integer.
+route inbox_pending 200 '{"pending":42}'
+out=$("$SCRIPT" pending); rc=$?
+assert_eq "pending still prints the bare count after the pending_probe refactor" "$out" "42"
+assert_eq "pending still exits 0 after the pending_probe refactor" "$rc" "0"
 
 finish

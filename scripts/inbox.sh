@@ -68,9 +68,21 @@ v = d.get(sys.argv[1])
 sys.stdout.write("" if v is None else str(v))
 ' "$2"; }
 
-cmd_pending() {
+# pending_probe — sets PENDING, and (via api()) HTTP_CODE, in the CURRENT
+# shell. cmd_watch must read HTTP_CODE after a failed poll to tell a 401 from
+# a transient error; `n=$(cmd_pending)` would run cmd_pending in a command
+# substitution subshell, where api()'s `HTTP_CODE=...` assignment dies with
+# the subshell and never reaches the caller — HTTP_CODE would read back
+# "000" forever, out there. pending_probe exists solely so nothing ever
+# captures cmd_pending's stdout again.
+pending_probe() {
   api GET /inbox/pending || return 1
-  json_field "$BODY" pending
+  PENDING=$(json_field "$BODY" pending)
+}
+
+cmd_pending() {
+  pending_probe || return 1
+  printf '%s' "$PENDING"
 }
 
 cmd_list() { api GET /inbox || return 1; printf '%s\n' "$BODY"; }
@@ -125,7 +137,7 @@ cmd_owner() {
 # stays honest at five-minute resolution without waking the model at all.
 cmd_watch() {
   [ $# -eq 1 ] || usage
-  local window=$1 deadline now n rc polls=0 failures=0
+  local window=$1 deadline now rc polls=0 failures=0
   case $window in ''|*[!0-9]*) usage ;; esac
 
   # An inbox that serves another instance must arm nothing. An unreachable
@@ -138,10 +150,10 @@ cmd_watch() {
   while :; do
     now=$(date +%s)
     [ "$now" -ge "$deadline" ] && return 124
-    n=$(cmd_pending); rc=$?
+    pending_probe; rc=$?
     if [ "$rc" -eq 0 ]; then
       failures=0
-      case $n in ''|*[!0-9]*) : ;; *) [ "$n" -gt 0 ] && return 0 ;; esac
+      case $PENDING in ''|*[!0-9]*) : ;; *) [ "$PENDING" -gt 0 ] && return 0 ;; esac
     else
       # A 401 cannot fix itself, and a watcher that can only ever spin is worse
       # than no watcher at all (adapter R5).
