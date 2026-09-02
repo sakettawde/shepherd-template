@@ -9,6 +9,7 @@
 #   inbox.sh ack      <event-id>
 #   inbox.sh activity <session-id> <thought|action|elicitation|response|error> <body>
 #   inbox.sh heartbeat
+#   inbox.sh watch    <seconds>
 #
 # Exit: 0 ok (for watch: there is work) / 124 watch window elapsed / 3 not
 #   configured or this inbox serves another instance / 1 hard error / 2 usage.
@@ -19,7 +20,7 @@ POLL_SECONDS="${SHEPHERD_INBOX_POLL:-60}"
 HEARTBEAT_EVERY=5          # polls, so ~5 minutes at the default interval
 MAX_CONSECUTIVE_FAILURES=10
 
-usage() { sed -n '3,14p' "$0" >&2; exit 2; }
+usage() { sed -n '3,15p' "$0" >&2; exit 2; }
 
 # cfg_value <key> — reads KEY=value out of the env file without executing it.
 # Sourcing an operator-owned file to get two strings would run anything else in
@@ -115,6 +116,51 @@ cmd_owner() {
   return 3
 }
 
+# watch <seconds> — the background watcher wake and monitor arm (adapter R5
+# shape: a bare command, never piped, whose exit code is the whole signal).
+#
+# It polls rather than subscribes because a poll costs nothing and needs no
+# long-lived connection from a laptop that sleeps. It heartbeats from inside
+# the loop, not from the caller, so the Worker's "last online N min ago" ack
+# stays honest at five-minute resolution without waking the model at all.
+cmd_watch() {
+  [ $# -eq 1 ] || usage
+  local window=$1 deadline now n rc polls=0 failures=0
+  case $window in ''|*[!0-9]*) usage ;; esac
+
+  # An inbox that serves another instance must arm nothing. An unreachable
+  # /health is NOT that case — the box may simply be offline for a moment — so
+  # it falls through to the loop, which retries and gives up on its own terms.
+  cmd_owner >/dev/null 2>&1
+  [ $? -eq 3 ] && return 3
+
+  deadline=$(( $(date +%s) + window ))
+  while :; do
+    now=$(date +%s)
+    [ "$now" -ge "$deadline" ] && return 124
+    n=$(cmd_pending); rc=$?
+    if [ "$rc" -eq 0 ]; then
+      failures=0
+      case $n in ''|*[!0-9]*) : ;; *) [ "$n" -gt 0 ] && return 0 ;; esac
+    else
+      # A 401 cannot fix itself, and a watcher that can only ever spin is worse
+      # than no watcher at all (adapter R5).
+      if [ "${HTTP_CODE:-000}" = "401" ] || [ "${HTTP_CODE:-000}" = "403" ]; then
+        echo "inbox: $HTTP_CODE from $INBOX_URL/inbox/pending - check INBOX_TOKEN" >&2
+        return 1
+      fi
+      failures=$((failures + 1))
+      if [ "$failures" -ge "$MAX_CONSECUTIVE_FAILURES" ]; then
+        echo "inbox: $failures consecutive failures reaching $INBOX_URL - giving up" >&2
+        return 1
+      fi
+    fi
+    polls=$((polls + 1))
+    [ $((polls % HEARTBEAT_EVERY)) -eq 0 ] && cmd_heartbeat >/dev/null 2>&1
+    sleep "$POLL_SECONDS"
+  done
+}
+
 [ $# -ge 1 ] || usage
 verb=$1; shift
 load_config; rc=$?
@@ -130,5 +176,6 @@ case $verb in
   ack)       cmd_ack "$@" ;;
   activity)  cmd_activity "$@" ;;
   heartbeat) cmd_heartbeat ;;
+  watch)     cmd_watch "$@" ;;
   *)         usage ;;
 esac

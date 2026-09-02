@@ -166,4 +166,38 @@ case $noise in *"$TOKEN"*) fail "no verb ever prints the token" "token found in 
                *) ok "no verb ever prints the token" ;; esac
 route inbox_pending 200 '{"pending":0}'
 
+# --- watch -----------------------------------------------------------------
+export SHEPHERD_INBOX_POLL=1
+route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
+
+route inbox_pending 200 '{"pending":0}'
+"$SCRIPT" watch 2 >/dev/null 2>&1
+assert_eq "watch exits 124 when the window elapses with nothing pending" "$?" "124"
+
+route inbox_pending 200 '{"pending":1}'
+start=$(date +%s)
+"$SCRIPT" watch 60 >/dev/null 2>&1; rc=$?
+assert_eq "watch exits 0 as soon as something is pending" "$rc" "0"
+assert_ok "watch returns promptly rather than serving out its window" \
+  test $(( $(date +%s) - start )) -lt 15
+
+route health 200 '{"status":"ok","shepherd_id":"shepherd-kelpie"}'
+"$SCRIPT" watch 5 >/dev/null 2>&1
+assert_eq "watch exits 3 for another instance's inbox, and arms nothing" "$?" "3"
+route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
+
+route inbox_pending 401 '{"error":"unauthorized"}'
+"$SCRIPT" watch 30 >/dev/null 2>&1
+assert_eq "watch exits 1 immediately on a 401 rather than spinning" "$?" "1"
+
+# The heartbeat is the reason this loop exists at all: the Worker's canned ack
+# tells the user how long ago shepherd was online, and a heartbeat posted only
+# at model wakes would make that text wrong for hours.
+route inbox_pending 200 '{"pending":0}'
+route heartbeat 200 '{"ok":true,"at":1}'
+: > "$LOG"
+"$SCRIPT" watch 7 >/dev/null 2>&1
+beats=$(grep -c '"path": "/heartbeat"' "$LOG")
+assert_ok "watch posts a heartbeat while it polls" test "${beats:-0}" -ge 1
+
 finish
