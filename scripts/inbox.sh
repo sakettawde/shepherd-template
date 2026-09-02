@@ -40,14 +40,20 @@ load_config() {
 }
 
 # api <method> <path> [json-body] — sets BODY and HTTP_CODE. 0 on 2xx.
-# The token goes in a header, never on the command line: an argument list is
-# world-readable in /proc.
+# The token goes in a header, never on the command line: an -H argument lands
+# in curl's own argv, readable at /proc/<curl-pid>/cmdline for the life of the
+# request. A -K config file read from stdin has no such exposure, so the
+# Authorization header travels that way instead — every other option (method,
+# writeout format, timeout, body) stays a normal argument since none of it is
+# secret. -K - is the only stdin reader in this function (the body, when
+# present, is a literal -d argument, never "-"), and curl is the last stage of
+# the pipe, so pipefail still surfaces curl's exit status here, not printf's.
 api() {
   local method=$1 path=$2 data=${3:-} raw
-  local -a args=(-sS -X "$method" -H "Authorization: Bearer $INBOX_TOKEN"
-                 -w '\n%{http_code}' --max-time 20)
+  local -a args=(-sS -X "$method" -K - -w '\n%{http_code}' --max-time 20)
   [ -n "$data" ] && args+=(-H 'Content-Type: application/json' -d "$data")
-  raw=$(curl "${args[@]}" "$INBOX_URL$path" 2>/dev/null) || { HTTP_CODE=000; BODY=; return 1; }
+  raw=$(printf 'header = "Authorization: Bearer %s"\n' "$INBOX_TOKEN" \
+          | curl "${args[@]}" "$INBOX_URL$path" 2>/dev/null) || { HTTP_CODE=000; BODY=; return 1; }
   HTTP_CODE=${raw##*$'\n'}
   BODY=${raw%$'\n'*}
   case $HTTP_CODE in 2*) return 0 ;; *) return 1 ;; esac

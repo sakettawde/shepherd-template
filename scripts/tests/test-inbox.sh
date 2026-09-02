@@ -136,6 +136,22 @@ route health 200 '{"status":"ok","shepherd_id":"shepherd-kelpie"}'
 "$SCRIPT" owner >/dev/null 2>&1; assert_eq "owner exits 3 for another instance's inbox" "$?" "3"
 assert_eq "owner does not authenticate" "$(last_request | field auth)" ""
 
+# --- token delivery (regression: -K stdin, not -H argv) --------------------
+# api() moved the Authorization header off curl's command line and onto a -K
+# config file read from stdin, to keep the token out of /proc/<pid>/cmdline.
+# The stub can't inspect curl's live argv, but it can confirm the header still
+# arrives at the Worker intact after the change, and that owner (which never
+# calls api()) still sends none.
+route inbox_pending 200 '{"pending":9}'
+out=$("$SCRIPT" pending)
+assert_eq "the -K-delivered bearer token still arrives at the Worker" \
+  "$(last_request | field auth)" "Bearer $TOKEN"
+assert_eq "and the request still round-trips correctly" "$out" "9"
+route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
+"$SCRIPT" owner >/dev/null 2>&1
+assert_eq "owner still sends no Authorization header after the api() change" \
+  "$(last_request | field auth)" ""
+
 # --- config and secrecy ----------------------------------------------------
 SHEPHERD_INBOX_ENV="$SHEPHERD_ROOT/absent.env" "$SCRIPT" pending >/dev/null 2>&1
 assert_eq "a missing config file exits 3, not 1" "$?" "3"
