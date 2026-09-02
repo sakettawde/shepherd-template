@@ -138,6 +138,33 @@ another instance's task. Anchor the re-arm on the count of terminal claims alrea
 the status file — adapter R5's primary recipe is that anchor, and a naive re-arm fires
 instantly on the claim you already handled.
 
+**Plus one inbox watcher for the instance** (not per task). `scripts/inbox.sh owner`
+decides whether this instance has one at all: exit 3 (no config, or the inbox serves
+another instance) → arm nothing and say so once in step 10's line. Exit 0 (this
+instance's inbox) or exit 1 (`/health` unreachable, or a response the check couldn't
+use) → arm as a background Bash task, bare, never piped:
+
+```bash
+scripts/inbox.sh watch 3600
+```
+
+Arming on exit 1 is safe because the watcher settles ownership itself, inside its poll
+loop — on every heartbeat tick, and once more before it reports work. One box runs several
+instances against one `inbox.env` and one bearer token, and that token authenticates the
+inbox rather than the instance, so a watcher that decided ownership only at arm time would
+let a momentary `/health` outage hand a non-owner a full window on the owner's inbox: one
+event drained twice, into two cards and two workers. The loop exits 3 the moment the
+Worker names another instance.
+
+Exit 0 → run monitor's `## Inbox drain`. Exit 124 → re-arm, nothing else.
+**Exit 4 → re-arm, and say one line to the operator naming the Worker as
+unreachable**: the failure
+ceiling is transient — Cloudflare trouble, or a laptop resuming ahead of its Wi-Fi — and
+clears in minutes, but it is still an outage visible from Linear's side, so it is reported
+rather than swallowed. Exit 1 or 3 → report it and do not re-arm; a watcher that can only
+fail is worse than none (adapter R5). The watcher heartbeats to the Worker as it polls, so
+nothing else has to.
+
 ### 9. Your queue
 
 ```bash
@@ -178,10 +205,11 @@ replaces the name in those listings ([Manage sessions](https://code.claude.com/d
 § "Name your sessions", read 2026-08-28).
 
 Then one line to the operator, in this order: your context %, your active tasks, the
-other live instances with their active tasks, and any orphans. The live set comes from
-the identity locks — `ls ledger/locks/shepherd-*.lock`, skipping `*.reclaim.lock`, each
-resolved through its pane/session (adapter R7). A lock whose holder is gone was already
-swept at step 3, so what remains and answers is the live set
+other live instances with their active tasks, the inbox watcher's state (armed, or step
+8's one-line reason it isn't — no config, or another instance's inbox), and any orphans.
+The live set comes from the identity locks — `ls ledger/locks/shepherd-*.lock`, skipping
+`*.reclaim.lock`, each resolved through its pane/session (adapter R7). A lock whose
+holder is gone was already swept at step 3, so what remains and answers is the live set
 (`docs/specs/multi-shepherd-design.md` §9 step 7).
 
 ## Done when

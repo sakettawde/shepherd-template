@@ -48,7 +48,7 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
    scripts/reserve-task-id.sh reserve "$SHEPHERD_ID" "$HERDR_PANE_ID" "<your agent_session>"
    ```
 
-   It prints `T-NNNN` and creates the card file holding a one-line reservation. Fill that file from `templates/task-card.md` in your very next action, and set `owner:` to your `SHEPHERD_ID`. A reservation left unfilled is safe — no other instance touches it while your pane is alive — but it is not a card until you fill it.
+   It prints `T-NNNN` and creates the card file holding a one-line reservation. Fill that file from `templates/task-card.md` in your very next action, and set `owner:` to your `SHEPHERD_ID`. When the message came from the Linear inbox rather than this pane, also set `linear-session:` and `linear-event:` from the event, and open the `## Log` with the issue identifier **and the event's author**, read from the event's `raw` field (the whole webhook body the Worker received). The words in that Brief came from a workspace member who may not be the operator, and the card is where that stays on the record. That session id is the only way retro — running hours later, in a fresh context — can answer in the thread the request came from. A reservation left unfilled is safe — no other instance touches it while your pane is alive — but it is not a card until you fill it.
 3. **Size / tier / budget**:
 
    | | size | budget | tier |
@@ -80,7 +80,7 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
 
 The operator names an existing `T-NNNN` to change, extend or drop. Nothing is created; the target card's **`state:` decides who owns the edit**.
 
-- **`captured` or `queued`** — yours. Re-read the card from disk, edit the Brief, append the Log line in the operator's words, commit via `scripts/ledger-commit.sh` (`T-NNNN: brief amended`). Cancel → `state: abandoned`, reason in the Log. Task cards take no lock: their `owner:` is the only writer (CLAUDE.md §2 rule 10). Locks guard *registry* cards.
+- **`captured` or `queued`** — yours. Re-read the card from disk, edit the Brief, append the Log line in the operator's words, commit via `scripts/ledger-commit.sh` (`T-NNNN: brief amended`). Cancel → `state: abandoned`, reason in the Log — and when the card carries a real `linear-session:`, post the closing answer here, `scripts/inbox.sh activity <linear-session> response "<one line: dropped, and why>"`, then Log it as `linear: response posted to <session>`. This is the one close-out path that never reaches retro, so it is the one place that obligation has to be restated; skip it and the requester's issue shows an agent that acknowledged and then went permanently silent. Task cards take no lock: their `owner:` is the only writer (CLAUDE.md §2 rule 10). Locks guard *registry* cards.
 - **`briefed`, `working` or `blocked`** — a worker is live, so the edit belongs to the owner acting through **monitor**. Classify it and hand it over.
   - *Amend*: when the addition is separable, a new card beats a wider brief — one focused task per worker. When it genuinely changes what done means, update the card first, then send the worker one line pointing at it; the card is the contract.
   - *Cancel*: route it through **retro** with verdict `abandoned` — harvest the `## Handoff`, retire the pane, release the project lock, registry `active-task: none`. The close-out path already does every step.
