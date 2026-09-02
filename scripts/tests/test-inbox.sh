@@ -307,7 +307,31 @@ route inbox_pending 200 'this is not json'
 assert_eq "a 2xx with an unusable body is a failure, not a quiet zero" "$rc" "4"
 assert_eq "and it feeds the same ceiling rather than polling the window away" \
   "$(count_path /inbox/pending)" "3"
+
+# The third road, and the one that used to be silent: a 2xx that parses, that
+# carries `pending`, and whose `pending` is not a count. "many", true and -1 all
+# arrive as a non-empty string, so a probe that only asked "is it empty?" passed
+# each of them on to a loop that failed no poll and counted no failure - the
+# watcher spun its whole window against a Worker answering nonsense and then
+# reported 124, "nothing pending". An 8s window against a 3-poll ceiling at a 1s
+# interval separates the two: exit 4 lands in about three seconds, where the old
+# behaviour served out all eight and returned 124.
+for bad in '{"pending":"many"}' '{"pending":true}' '{"pending":-1}'; do
+  route inbox_pending 200 "$bad"
+  : > "$LOG"
+  "$SCRIPT" watch 8 >/dev/null 2>&1; rc=$?
+  assert_eq "a 2xx carrying $bad is a failed poll, never a quiet zero" "$rc" "4"
+  assert_eq "and $bad reaches the ceiling instead of spinning the window out" \
+    "$(count_path /inbox/pending)" "3"
+done
 unset SHEPHERD_INBOX_MAX_FAILURES
+
+# The same gate on the public verb: `pending` answers with a count or it fails.
+route inbox_pending 200 '{"pending":"many"}'
+out=$("$SCRIPT" pending 2>/dev/null); rc=$?
+assert_eq "pending fails rather than printing a count that is not one" "$rc" "1"
+assert_eq "and prints nothing when it does" "$out" ""
+route inbox_pending 200 '{"pending":0}'
 
 # --- the token is checked before it reaches a curl -K line -----------------
 # api() interpolates the token into `header = "Authorization: Bearer <token>"`.

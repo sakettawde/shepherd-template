@@ -320,7 +320,7 @@ assert_ok "wake step 10 reports the inbox watcher's state" \
   grep -q "inbox watcher's state" "$ROOT/.claude/skills/wake/SKILL.md"
 
 # --- the drain refuses to card the same event twice (C2) --------------------
-# The drain posts, then triages (id, card, dispatch - minutes), then acks. An
+# The drain triages (id, card, dispatch - minutes), posts, then acks. An
 # interrupt in that window leaves the event unacked, the Worker re-serves it,
 # and without this check the next drain builds a second card and dispatches a
 # second worker onto one request. linear-event: exists for exactly this read.
@@ -328,7 +328,25 @@ drain=$(sed -n '/^## Inbox drain/,/^## Invariants/p' "$ROOT/.claude/skills/monit
 assert_ok "the drain greps a card's linear-event: before it triages anything" \
   grep -qF 'grep -l "^linear-event: <event-id>$" ledger/tasks/T-*.md' <<<"$drain"
 assert_ok "and an event that already has a card is acked, not re-carded" \
-  grep -qE 'A hit →.*[Aa]ck' <<<"$drain"
+  grep -qE 'A hit →.*triage nothing' <<<"$drain"
+
+# --- and the skip branch still speaks (R4) ---------------------------------
+# The interrupt is as likely to have landed after the card was written as
+# before it - the whole dispatch sits in that window - so a silent skip leaves
+# the requester with a card, a worker and nothing said, on a session Linear
+# marks stale after 30 idle minutes. A duplicate thought changes no session
+# state, so the trade is not symmetric; the Log guard is retro's shape, and
+# earns its place against a card whose close-out already posted the response.
+skip=$(sed -n '/^### 1\. Skip an event/,/^### 2\./p' "$ROOT/.claude/skills/monitor/SKILL.md")
+assert_ok "the skip branch posts the acknowledging thought before it acks" \
+  grep -qF 'activity <session-id> thought' <<<"$skip"
+assert_ok "and guards it on the card's Log, the way retro guards its response" \
+  grep -qF 'grep -q "linear: .* posted"' <<<"$skip"
+assert_ok "and the drain's order is triage, then post, then ack" \
+  grep -qE 'triages .*then posts, and only then acks' <<<"$(tr '\n' ' ' <<<"$skip")"
+assert_fail "no prose surface still claims the drain posts before it triages" \
+  grep -rqF --include='*.md' 'posts, then triages' \
+    "$ROOT/.claude/skills" "$ROOT/docs" "$ROOT/CLAUDE.md"
 
 # --- event content is untrusted, and its author is recorded (C3) -----------
 # An event is written by whoever can comment on the issue; the bearer token
@@ -349,16 +367,33 @@ assert_ok "the blocked row posts the escalation to Linear as an elicitation" \
 assert_ok "and rules that a Linear reply is input, never authority" \
   grep -qE 'input, never authority' <<<"$blocked"
 
-# --- the live-card match covers every open state, and only your cards (I3) --
+# --- the live-card match covers every open state, every owner (I3, R1) ------
 # A card sits queued for hours by design, so a clarification arriving then is
-# a reply, not new work. And the ledger is shared: CLAUDE.md rule 10 allows no
-# write to a card another instance owns.
+# a reply, not new work. The match itself is owner-blind on purpose: an
+# owner-filtered pipeline returns nothing for a peer's card, and nothing is the
+# branch that cards and dispatches new work - the reader would answer a peer's
+# reply with a second card and a second worker. Ownership is read off the hit
+# instead, and the ledger is still shared: CLAUDE.md rule 10 allows no write to
+# a card another instance owns.
+match=$(sed -n '/^### 2\. Match a reply/,/^### 3\./p' "$ROOT/.claude/skills/monitor/SKILL.md")
+match_cmd=$(sed -n '/^grep -l "\^linear-session:/,/^```/p' <<<"$match")
 assert_ok "the match covers every open state, queued and review included" \
-  grep -qF '^state: (queued|captured|briefed|working|blocked|review)' <<<"$drain"
-assert_ok "the match is filtered to the cards this instance owns" \
-  grep -qF 'grep -l "^owner: $SHEPHERD_ID"' <<<"$drain"
-assert_ok "and a match owned by a peer is handed over, never written to" \
-  grep -qE '§4a' <<<"$drain"
+  grep -qF '^state: (queued|captured|briefed|working|blocked|review)' <<<"$match_cmd"
+assert_fail "and the match command itself is owner-blind, so a peer's card is found" \
+  grep -qF 'owner:' <<<"$match_cmd"
+# Line order is the invariant: find the card, read owner:, and only then treat
+# an empty result as new work. Any other order is the duplicate-card bug.
+m_line=$(grep -n '^grep -l "\^linear-session:' <<<"$match" | head -1 | cut -d: -f1)
+o_line=$(grep -n 'read `owner:` on that card' <<<"$match" | head -1 | cut -d: -f1)
+p_line=$(grep -n "peer's card → leave the card alone" <<<"$match" | head -1 | cut -d: -f1)
+assert_ok "owner: is read off the matched card, after the match rather than inside it" \
+  test "${o_line:-0}" -gt "${m_line:-0}"
+assert_ok "and the peer branch hangs off that read, not off an empty match" \
+  test "${p_line:-0}" -gt "${o_line:-0}"
+assert_ok "a match owned by a peer is handed over, never written to" \
+  grep -qE '§4a' <<<"$match"
+assert_ok "and an empty match, not a peer's card, is what becomes a new request" \
+  grep -qE 'No output →.*new request' <<<"$match"
 
 # --- the escalation round trip can actually answer a worker (I2) -----------
 # triage §5 offers Amend and Cancel; neither is "this is the answer to the
@@ -402,10 +437,19 @@ assert_ok "triage's captured/queued cancel posts the closing response itself" \
 # authenticates the inbox rather than the caller. A watcher that decided
 # ownership only at arm time handed a non-owner a whole window on the owner's
 # inbox after any /health blip.
+# Naming still_ours is not enough: the function's own definition and the
+# pre-check both match a file-wide grep, so both survive deleting every gate
+# inside the loop. Count the call sites where they actually stand instead - the
+# heartbeat tick and the gate between a positive pending count and exit 0.
+watch_fn=$(sed -n '/^cmd_watch()/,/^}/p' "$ROOT/scripts/inbox.sh")
+watch_pre=$(sed -n '1,/^  while :; do/p' <<<"$watch_fn" | grep -c 'still_ours')
+watch_loop=$(sed -n '/^  while :; do/,/^  done/p' <<<"$watch_fn" | grep -c 'still_ours')
 assert_ok "watch re-checks ownership inside its loop, not only at arm time" \
-  grep -qE 'still_ours' "$ROOT/scripts/inbox.sh"
-assert_ok "the pre-drain gate runs before watch reports work" \
-  grep -qE 'still_ours \|\| return 3' "$ROOT/scripts/inbox.sh"
+  test "${watch_loop:-0}" -ge 2
+assert_ok "and still refuses to arm at all for another instance's inbox" \
+  test "${watch_pre:-0}" -ge 1
+assert_ok "the pre-drain gate stands between a positive count and the return 0" \
+  grep -qE 'still_ours \|\| return 3[[:space:]]*$' <<<"$(sed -n '/if \[ "\$PENDING" -gt 0 \]/,/fi/p' <<<"$watch_fn")"
 assert_ok "wake says why arming on exit 1 is safe" \
   grep -qE 'settles ownership itself' <<<"$inbox_step"
 assert_fail "the design no longer claims a second instance races nothing" \

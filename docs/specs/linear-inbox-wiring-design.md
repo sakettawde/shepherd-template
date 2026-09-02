@@ -76,9 +76,13 @@ resumed ahead of its Wi-Fi — and both are over in minutes. Exiting `1` there r
 intake *and* the heartbeat for the rest of the session while the Worker went on telling
 every new mention that shepherd was last online hours ago. `4` says "transient": both
 callers re-arm on it, and both say one line to the operator while they do, because a silent
-recovery hides an outage that is visible from Linear's side. A 2xx whose body is not the
-JSON the poll asked for feeds the same counter and reaches the same ceiling — harmless on
-its own, and the second road to what used to be a permanent disarm.
+recovery hides an outage that is visible from Linear's side. A 2xx that does not answer the
+question the poll asked feeds the same counter and reaches the same ceiling — a body that
+will not parse, a body with no `pending` in it, and a `pending` that is not a non-negative
+integer (`"many"`, `true`, `-1`) alike. Each is harmless on its own, and each is a road to
+what used to be a permanent disarm. The type check is what makes the claim true: a
+wrong-typed `pending` arrives as a non-empty string, so a probe that asked only whether it
+was empty passed it on as an answer and polled the window away in silence.
 
 **`owner`** asks `GET /health` and compares its `shepherd_id` to `$SHEPHERD_ID`. The Worker
 already knows which single shepherd it serves, so ownership needs no second source of truth and
@@ -92,10 +96,10 @@ a busy inbox, and the "last online" text went stale exactly when shepherd was bu
 the heartbeat lives in the watcher at all, rather than in the wake handlers, is the same
 argument one level up: the Worker's canned acknowledgement says how long ago shepherd was
 last online, and a beat posted only at model wakes would make that text wrong for hours. A
-shell poll costs nothing. Transient failures (curl exit, 5xx, a 2xx body that will not parse)
-are retried to the ceiling and then reported as `4`; a 401 or a malformed config exits 1
-immediately, because those cannot fix themselves and a watcher that can only spin is worse
-than no watcher (adapter R5).
+shell poll costs nothing. Transient failures (curl exit, 5xx, a 2xx body that will not parse
+or whose `pending` is not a count) are retried to the ceiling and then reported as `4`; a
+401 or a malformed config exits 1 immediately, because those cannot fix themselves and a
+watcher that can only spin is worse than no watcher (adapter R5).
 
 **Ownership is settled inside the loop, not only before it.** The pre-check refuses an inbox
 the Worker says belongs to another instance (exit 3) but tolerates an unreachable `/health`,
@@ -130,19 +134,31 @@ field, which carries the whole webhook body the Worker received.
 
 1. `scripts/inbox.sh list` — every pending event, oldest first.
 2. **Skip an event that is already carded.** `grep -l "^linear-event: <event-id>$"
-   ledger/tasks/T-*.md` — a hit means a previous drain already made this card. Ack it, post
-   nothing, move on. The drain posts, then triages (an id reserved, a card written, dispatch
-   invoked — minutes), and only then acks, so a rollover, a crash or an interrupt inside that
-   window leaves the event unacked and the Worker re-serves it. Without the check, the next
-   drain triages it into a second card and a second worker against one request. This is the
-   whole reason `linear-event:` is a field rather than a Log line.
+   ledger/tasks/T-*.md` — a hit means a previous drain already made this card, so triage
+   nothing: post the acknowledging `thought` where the card's Log does not already record a
+   posting, then ack and move on. The drain triages (an id reserved, a card written, dispatch
+   invoked — minutes), then posts, and only then acks, so a rollover, a crash or an interrupt
+   inside that window leaves the event unacked and the Worker re-serves it. Without the check,
+   the next drain triages it into a second card and a second worker against one request. This
+   is the whole reason `linear-event:` is a field rather than a Log line. The skip branch still
+   speaks because the interrupt is as likely to have landed *after* the card was written as
+   before it — the whole dispatch sits in that window — and a card, a worker and no word to
+   the requester is the acknowledged-then-silent failure this design exists to close, on a
+   session Linear marks `stale` after 30 idle minutes. A duplicate `thought` is not the
+   mirror-image cost: it changes no session state. The Log guard is §6's, in the one shape
+   where a duplicate would matter — a card whose close-out already posted the `response` that
+   completed the session.
 3. **Match a reply to a card in flight**, by `session_id` against `linear-session:`, across
    every open state — `queued`, `captured`, `briefed`, `working`, `blocked`, `review` — and
-   filtered to cards this instance owns. `queued` is in that list because a card sits queued
-   for hours by design, and a clarification arriving then is a reply, not a new request. The
-   owner filter is CLAUDE.md §2 rule 10: the ledger is shared and the only sanctioned write to
-   another instance's card is the sweep's orphan Log line, so a match owned by a peer is acked,
-   acknowledged with a `thought`, and handed to that instance by the §4a tri-state.
+   across every owner. `queued` is in that list because a card sits queued for hours by
+   design, and a clarification arriving then is a reply, not a new request. **Ownership is
+   read off the matched card, never folded into the match**: an owner-filtered match returns
+   nothing for a peer's card, and "nothing" is step 4's new-request branch, so the two
+   together would card and dispatch a second worker onto a request that already has one.
+   Reading `owner:` after the hit is CLAUDE.md §2 rule 10 applied where it belongs: the ledger
+   is shared and the only sanctioned write to another instance's card is the sweep's orphan
+   Log line, so a match owned by a peer is acked, acknowledged with a `thought`, and handed to
+   that instance by the §4a tri-state.
    - A matched card in `blocked` on a question posted as an `elicitation` returns to
      **monitor's blocked row, its answer path** — reply to the worker, log the decision,
      `blocked` → `working`, re-arm. Triage §5 cannot serve this: it offers *Amend* and
@@ -254,14 +270,16 @@ narrower.
   output. `watch` gets the cases the exit code alone cannot settle: it exits 0 on a pending
   count and 124 on an elapsed window; an unreachable `/health` at arm time never becomes a
   licence to drain another instance's inbox, asserted by the `/health` requests the loop makes
-  *after* the pre-check and by the gate that runs after the pending probe; the failure ceiling
-  and an unparseable 2xx body both exit 4 having spent the whole ceiling; the first poll
+  *after* the pre-check and by the gate that runs after the pending probe; the failure ceiling,
+  an unparseable 2xx body and a 2xx whose `pending` is a string, a boolean or a negative number
+  all exit 4 having spent the whole ceiling rather than the window; the first poll
   heartbeats; and a token holding a quote, a backslash or whitespace is refused with nothing
   sent to the Worker and the value never printed. The stub serves queued one-shot replies, so a
   case can make `/health` answer differently on the first request than on the third.
 - `scripts/tests/test-docs.sh` — assertions that `linear-session:` has one spelling and reaches
-  the template, triage, monitor and retro; that the drain dedupes on `linear-event:`, names its
-  input untrusted, matches on every open state and filters by owner; that the closing
+  the template, triage, monitor and retro; that the drain dedupes on `linear-event:` and still
+  posts a `thought` on that skip, names its input untrusted, matches on every open state
+  without an owner filter and reads `owner:` off the hit afterwards; that the closing
   `response` is retro's alone and covers `abandoned`; and that wake and monitor both re-arm on
   exit 4. The manual is the product here; a surface that silently forgets one of these is the
   failure mode this file exists to catch. The assertions anchor on the greppable invariant —

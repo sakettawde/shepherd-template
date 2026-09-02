@@ -114,7 +114,13 @@ pending_probe() {
   # feeds the same consecutive-failure counter as an unreachable Worker, and
   # that counter's ceiling is exit 4 — transient, re-armed — not a disarm.
   PENDING=$(json_field "$BODY" pending) || return 1
-  [ -n "$PENDING" ] || return 1
+  # A pending count is a non-negative integer or it is not an answer, and the
+  # type matters as much as the presence: {"pending":"many"}, {"pending":true}
+  # and {"pending":-1} all arrive here as a non-empty string, so a probe that
+  # only asked "is it empty?" passed them on, failed no poll, counted no
+  # failure and polled the whole window away in silence. Everything that is not
+  # a run of digits is a failed poll, on the one road to the ceiling and exit 4.
+  case $PENDING in ''|*[!0-9]*) PENDING=; return 1 ;; esac
   return 0
 }
 
@@ -215,15 +221,17 @@ cmd_watch() {
 
     pending_probe; rc=$?
     if [ "$rc" -eq 0 ]; then
+      # rc 0 means pending_probe validated the count, so the only question
+      # left here is whether it is above zero. The type check lives there and
+      # only there: a second, quieter one here was how a wrong-typed count
+      # reached this branch and fell out of it counting nothing.
       failures=0
-      case $PENDING in ''|*[!0-9]*) : ;; *)
-        if [ "$PENDING" -gt 0 ]; then
-          # Never hand a drain to a non-owner. This is the last gate before
-          # the caller reads exit 0 and starts posting to Linear.
-          still_ours || return 3
-          return 0
-        fi ;;
-      esac
+      if [ "$PENDING" -gt 0 ]; then
+        # Never hand a drain to a non-owner. This is the last gate before the
+        # caller reads exit 0 and starts posting to Linear.
+        still_ours || return 3
+        return 0
+      fi
     else
       # A 401 cannot fix itself, and a watcher that can only ever spin is worse
       # than no watcher at all (adapter R5).
