@@ -48,7 +48,7 @@ Ask in **frontier rounds** (grilling pattern): batch every question askable *now
    scripts/reserve-task-id.sh reserve "$SHEPHERD_ID" "$HERDR_PANE_ID" "<your agent_session>"
    ```
 
-   It prints `T-NNNN` and creates the card file holding a one-line reservation. Fill that file from `templates/task-card.md` in your very next action, and set `owner:` to your `SHEPHERD_ID`. A reservation left unfilled is safe — no other instance touches it while your pane is alive — but it is not a card until you fill it.
+   It prints `T-NNNN` and creates the card file holding a one-line reservation. Fill that file from `templates/task-card.md` in your very next action, and set `owner:` to your `SHEPHERD_ID`. When the message came from the Linear inbox rather than this pane, also set `linear-session:` and `linear-event:` from the event, and open the `## Log` with the issue identifier. That session id is the only way retro — running hours later, in a fresh context — can answer in the thread the request came from. A reservation left unfilled is safe — no other instance touches it while your pane is alive — but it is not a card until you fill it.
 3. **Size / tier / budget**:
 
    | | size | budget | tier |

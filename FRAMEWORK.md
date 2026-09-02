@@ -19,6 +19,7 @@ Measure drift with `git log template/main..HEAD -- <framework paths>`; a `diff -
 | `docs/herdr-schema-*.json` | framework | pin snapshots |
 | `docs/writing-for-agents.md` | framework | reference for skills/CLAUDE.md authoring (onboard, retro) |
 | `docs/specs/multi-shepherd-design.md` | framework | the concurrency design CLAUDE.md §8 cites (§6.1 lock kinds, §9 session start) |
+| `docs/specs/linear-inbox-wiring-design.md` | framework | the Linear inbox design `scripts/inbox.sh`'s header cites |
 | `ledger/**` | instance state | task cards, status JSONLs, attachments |
 | `ledger/locks/**`, `ledger/shepherds/**` | instance state | runtime coordination; gitignored, never synced |
 | `registry/**` | instance state | project index + cards |

@@ -8,6 +8,8 @@ touch-areas: <what the work reaches, comma-separated: modules, schemas, config d
 parallel-safety: <independent|serialized> — <one line: the shared contract that decides it>
 pane: none   session: none
 created: <YYYY-MM-DDTHH:MM>
+linear-session: <agent session id, when this card came from Linear | none>
+linear-event: <the inbox event id that created it | none>
 
 ## Brief
 

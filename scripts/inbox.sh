@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shepherd's side of the Linear agent inbox: the only place the shepherd-inbox
 # Worker's HTTP contract lives. See
-# docs/superpowers/specs/2026-09-02-linear-inbox-wiring-design.md
+# docs/specs/linear-inbox-wiring-design.md
 #
 #   inbox.sh owner
 #   inbox.sh pending

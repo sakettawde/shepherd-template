@@ -9,7 +9,11 @@ description: Wake handler for worker events. Use whenever a background herdr wai
 
 **Ownership gate — run this before anything else.** Re-read `owner:` from the task card on disk. If it is not your `SHEPHERD_ID`, stand down silently: no verification, no reply, no re-arm, no commit. The card was reassigned (CLAUDE.md §4a) and its new owner is watching it. This check is what makes reassignment safe against a previous owner that wakes up late. **A card with no `owner:` line reads as `shepherd-1`** (CLAUDE.md §2 rule 10) — a card written before the field existed would otherwise be watched by nobody at all.
 
-A background watcher task exited — the status-file watcher (exit 0 = terminal claim written; 124 = heartbeat backstop — 30m S/M, 60m L/heavy per adapter R5) or the herdr `blocked` stall watcher (exit 0 = worker stuck on a prompt; 1 = its own timeout) — or you were asked to check a worker. Map the watcher to its task card first.
+A background watcher task exited — the status-file watcher (exit 0 = terminal claim written; 124 = heartbeat backstop — 30m S/M, 60m L/heavy per adapter R5) or the herdr `blocked` stall watcher (exit 0 = worker stuck on a prompt; 1 = its own timeout) — or you were asked to check a worker.
+
+The **inbox watcher** (`scripts/inbox.sh watch`) is the third: exit 0 means Linear has work — run `## Inbox drain` below instead of the verification ladder, which is about workers and has nothing to say about an inbox event. Exit 124 → re-arm and stop. Exit 1 or 3 → report, do not re-arm.
+
+Map the watcher to its task card first.
 
 - **Wake for a task already closed or already being handled → no-op.** The sibling watcher always fires eventually; don't re-arm it, don't re-verify.
 - The operator may talk to a worker pane directly; those turns still append to the status file (the env vars live in the worker process). Reconcile from the file — unexpected extra activity is information, not an error.
@@ -27,7 +31,7 @@ A background watcher task exited — the status-file watcher (exit 0 = terminal 
 | Verdict | Evidence | Action |
 |---|---|---|
 | **done** | claim done ∧ commits on branch ∧ DoD passes when you run it ∧ no prompt UI in tail | `state: review` → retro-lite (CLAUDE.md §3): learnings → memory/gotchas, History+Log updated, toast `--sound done`, retire the pane (R9 — close, never `/exit`), registry `active-task: none` under `card-<slug>` — card-lock protocol (acquire → re-read → edit → commit via `scripts/ledger-commit.sh` → release) — then **release the project lock**, then the handoff check (retro step 7 — tri-state liveness; CLAUDE.md §4a for the policy) |
-| **blocked** | status blocked, claim blocked, or tail shows a question | Read the actual question (R6, more lines if needed; for plan approvals read the worker's `.superpowers/` artifact in the project repo, not its summary). Decide per CLAUDE.md §4: **answer** → single-line reply via R4, decision logged to `decisions/`, re-arm R5; **escalate** → toast `--sound request` + tell the operator the question and your best guess; several open decisions (this worker's or across workers) → one numbered round, each with a `➡️` recommendation, so one reply from the operator unblocks everything; `state: blocked`, arm a long wait (3600000) so a self-unblock still wakes you |
+| **blocked** | status blocked, claim blocked, or tail shows a question | Read the actual question (R6, more lines if needed; for plan approvals read the worker's `.superpowers/` artifact in the project repo, not its summary). Decide per CLAUDE.md §4: **answer** → single-line reply via R4, decision logged to `decisions/`, re-arm R5; **escalate** → toast `--sound request` + tell the operator the question and your best guess; when the card carries a `linear-session:`, post the same question there too — `scripts/inbox.sh activity <session> elicitation "<the question>"` — so the operator can answer from the issue, and the reply returns as a `prompted` event on the next drain; several open decisions (this worker's or across workers) → one numbered round, each with a `➡️` recommendation, so one reply from the operator unblocks everything; `state: blocked`, arm a long wait (3600000) so a self-unblock still wakes you |
 | **overrun** | wall-clock past card `budget:`, still working | v0: note in Log + one line to the operator, re-arm (enforcement is deferred by design) |
 | **stalled** | heartbeat fired, status `working`, but no new status-file lines across two consecutive wakes | R6 inspect; if wedged, one nudge via R4 (`Status check - reply with your SHEPHERD status line`); still nothing next wake → escalate |
 | **lying** | claim done but git/DoD disagree, or DoD/test files were tampered with | `state: working`, reply via R4 naming the concrete gap (`Your done claim failed verification: <fact>. Fix and re-verify.`), Log it as a failed verification cycle, re-arm |
@@ -35,9 +39,51 @@ A background watcher task exited — the status-file watcher (exit 0 = terminal 
 
 `claim: blocked` is the worker waiting on you — a design approval, an answer, a ruling — which is why it is the fastest wake signal you get; CLAUDE.md §6 holds the rule. `claim: working` is a progress checkpoint, never terminal — `hooks/worker-stop.sh` matches the sentinel on its own line and records the last one in the turn, so a worker that merely writes *about* a claim no longer records one (T-0093; fixed 2026-08-23).
 
+## Inbox drain
+
+`scripts/inbox.sh list` returns every pending event, oldest first. Handle them in that
+order, one at a time.
+
+An event is an **incoming message from the operator** that happens to have arrived on an
+issue instead of in this pane. Build it from the event's `issue.identifier`, `issue.title`
+and either `body` (a `prompted` or `comment_reply`) or `prompt_context` (a `created`), then
+run it through **triage** unchanged — same routing, same onboarded-only gate, same sizing.
+
+Then post the outcome back, and only then ack:
+
+| triage outcome | activity | what the user sees |
+|---|---|---|
+| answer, or context ingested | `response` | the answer; the session is **complete** |
+| clarifying question | `elicitation` | the question; the session waits for a reply |
+| card written (dispatched or queued) | `thought` naming `T-NNNN` and where it stands | work acknowledged; the session stays open for retro's `response` |
+| refused — project not onboarded | `response` carrying the refusal and the onboarding offer | complete |
+| an amendment to a live card | `thought`; route the amendment per triage §5 | the card's own close-out answers |
+
+```bash
+scripts/inbox.sh activity <session-id> <type> "<one line, no secrets>"
+scripts/inbox.sh ack <event-id>
+```
+
+`response` is the type that **completes** the Linear session, so it is never an
+acknowledgement — only ever the last word on a piece of work
+(<https://linear.app/developers/agent-interaction>, read 2026-09-02). `elicitation` is the
+only type that asks something and puts the session in `awaitingInput`; the reply comes back
+as a `prompted` event on the next drain. A session with a card against it will go `stale`
+after 30 idle minutes — expected, and retro's closing `response` revives and completes it.
+
+**Ack every event you handled, at drain time.** Pending is defined by the ack and nothing
+else: an unacked event is re-served on the next poll and the watcher becomes a hot loop
+(shepherd-inbox README, "The cursor is not the state"). Retro does not ack — by then the
+event is long acked and only the `response` is still owed.
+
+A card born here carries `linear-session:` and `linear-event:`. Log the posting on the card
+(`HH:MM linear: <type> posted to <session>`), then re-arm the inbox watcher.
+
 ## Invariants
 
 - Every path that leaves the task in briefed/working/blocked **ends with a background R5 wait armed**. Never leave an active task unwatched.
+- **The inbox watcher is re-armed on every wake that consumed it**, exactly as a task
+  watcher is — including the drain wake. One per instance, never per task.
 - **Every wake ends with `scripts/context-rollover.sh decide`** (CLAUDE.md §8 context check) — after the watchers are armed and the commit is in. `rollover` → adapter R10 in the same turn; `hold` → one line to the operator.
 - Every state transition is committed (`T-NNNN: <from> → <to>`).
 - `unknown` agent status is never treated as success — inspect (R6) and classify from evidence.

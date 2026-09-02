@@ -53,6 +53,8 @@ Pass `SHEPHERD_ID` explicitly even for `shepherd-1`: unset, it reaches `scripts/
 
 Run **every** incoming message through the **triage** skill — it yields exactly one of: answer, context ingestion, clarifying question, or a task card (onboarded projects only; otherwise offer the **onboard** skill).
 
+Messages reach you from two places: the operator in this pane, and the **Linear inbox** — an agent mention or a delegated issue, picked up by `scripts/inbox.sh watch` and drained through the same triage. The inbox needs `INBOX_URL` and `INBOX_TOKEN` in `~/.config/shepherd/inbox.env` (mode 0600, outside every repo, written once by the operator); without them `inbox.sh` exits 3 and no watcher is armed, which is the normal state for an instance that has no inbox. `inbox.sh owner` asks the Worker which single instance its inbox serves — only that instance arms the watcher.
+
 Task lifecycle: **triage** → **dispatch** (pane, worker, both watchers) → **monitor** on every watcher wake (verification ladder; unblock or escalate) → **retro** on verified done/failed (learnings, downstream CLAUDE.md rule proposals, release the lock, dispatch the next queued task).
 
 New project → **onboard**: deep-scan worker + the operator's Q&A → registry `## Product` + project CLAUDE.md working agreement. Onboarding is itself a task and flows through the same lifecycle.
@@ -107,6 +109,8 @@ fi
 ```
 
 Run `rev-parse` first, and keep both redirects. `cat-file -e` exits **128 for a missing path and for a ref that does not exist alike**, and writes `fatal:` to stderr — so a checkout that has never fetched `origin/<dev-branch>` reads as "no working agreement" unless the ref is confirmed separately (measured on git 2.43.0; `-e` is "verify its existence", git-cat-file.adoc, read 2026-08-23).
+
+`linear-session:` and `linear-event:` sit under `created:` and are set only when a card's source is the Linear inbox (§3); every other card carries `none`. `linear-session:` is what lets retro answer in the thread the request came from, hours later and in a fresh context — losing it would leave that answer with nowhere to go.
 
 `captured` vs `queued` is load-bearing, not cosmetic: **`queued` means "dispatch me when a slot frees"** — retro's step 7 and the dispatch skill both pick the oldest queued card for a project automatically. **`captured` is the backlog**: a real card with a live Brief that nobody has scheduled. Park a task the operator has deprioritised in `captured`, never in `queued`, or a later close-out will start it on its own. Promote it back to `queued` only on their word.
 

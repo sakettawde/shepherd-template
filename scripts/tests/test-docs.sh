@@ -279,4 +279,35 @@ assert_ok "the validation names the observable that settled it" \
 assert_ok "the validation cites its source" \
   grep -qF 'code.claude.com/docs' <<<"$val"
 
+# --- the Linear inbox reaches every surface that has to know about it -------
+# The field is the whole handoff between the drain that creates a card and the
+# close-out that answers in Linear hours later. A surface that quietly forgets
+# it leaves a Linear user with a question that is never answered.
+for f in CLAUDE.md \
+         templates/task-card.md \
+         .claude/skills/monitor/SKILL.md \
+         .claude/skills/triage/SKILL.md \
+         .claude/skills/retro/SKILL.md; do
+  assert_ok "linear-session: is known to $f" grep -q 'linear-session:' "$ROOT/$f"
+done
+
+tokens=$(grep -rhoiE 'linear[-_]session:' --include='*.md' --include='*.sh' "$ROOT" 2>/dev/null | sort -u)
+assert_eq "one spelling of linear-session, everywhere" "$tokens" "linear-session:"
+
+assert_ok "wake arms the inbox watcher" \
+  grep -q 'inbox.sh watch' "$ROOT/.claude/skills/wake/SKILL.md"
+assert_ok "monitor re-arms the inbox watcher" \
+  grep -q 'inbox watcher is re-armed' "$ROOT/.claude/skills/monitor/SKILL.md"
+assert_ok "monitor holds the drain procedure" \
+  grep -q '^## Inbox drain' "$ROOT/.claude/skills/monitor/SKILL.md"
+# response completes the Linear session, so exactly one surface may post it,
+# and it is the close-out. A response posted at drain time for carded work
+# would close the session before the work started.
+assert_ok "retro is where the closing response is posted" \
+  grep -q 'activity <linear-session> response' "$ROOT/.claude/skills/retro/SKILL.md"
+assert_ok "the drain acks, and says why it cannot wait for retro" \
+  grep -q 'Ack every event you handled, at drain time' "$ROOT/.claude/skills/monitor/SKILL.md"
+assert_ok "CLAUDE.md names the inbox config file" \
+  grep -q 'config/shepherd/inbox.env' "$ROOT/CLAUDE.md"
+
 finish

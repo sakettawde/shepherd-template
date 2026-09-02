@@ -138,6 +138,19 @@ another instance's task. Anchor the re-arm on the count of terminal claims alrea
 the status file — adapter R5's primary recipe is that anchor, and a naive re-arm fires
 instantly on the claim you already handled.
 
+**Plus one inbox watcher for the instance** (not per task). `scripts/inbox.sh owner`
+decides whether this instance has one at all: exit 3 (no config, or the inbox serves
+another instance) → arm nothing and say so once in step 10's line; exit 0 → arm as a
+background Bash task, bare, never piped:
+
+```bash
+scripts/inbox.sh watch 3600
+```
+
+Exit 0 → run monitor's `## Inbox drain`. Exit 124 → re-arm, nothing else. Exit 1 or 3 →
+report it and do not re-arm; a watcher that can only fail is worse than none (adapter
+R5). The watcher heartbeats to the Worker as it polls, so nothing else has to.
+
 ### 9. Your queue
 
 ```bash
