@@ -140,8 +140,12 @@ instantly on the claim you already handled.
 
 **Plus one inbox watcher for the instance** (not per task). `scripts/inbox.sh owner`
 decides whether this instance has one at all: exit 3 (no config, or the inbox serves
-another instance) → arm nothing and say so once in step 10's line; exit 0 → arm as a
-background Bash task, bare, never piped:
+another instance) → arm nothing and say so once in step 10's line. Exit 0 (this
+instance's inbox) or exit 1 (`/health` unreachable, or a response the check couldn't
+use) → arm as a background Bash task, bare, never piped — `cmd_watch` tolerates an
+unreachable `/health` the same way, falling through to its own poll loop and deciding on
+its own terms (adapter R5), so the pre-check must not bail where the watcher itself
+would carry on:
 
 ```bash
 scripts/inbox.sh watch 3600
@@ -191,10 +195,11 @@ replaces the name in those listings ([Manage sessions](https://code.claude.com/d
 § "Name your sessions", read 2026-08-28).
 
 Then one line to the operator, in this order: your context %, your active tasks, the
-other live instances with their active tasks, and any orphans. The live set comes from
-the identity locks — `ls ledger/locks/shepherd-*.lock`, skipping `*.reclaim.lock`, each
-resolved through its pane/session (adapter R7). A lock whose holder is gone was already
-swept at step 3, so what remains and answers is the live set
+other live instances with their active tasks, the inbox watcher's state (armed, or step
+8's one-line reason it isn't — no config, or another instance's inbox), and any orphans.
+The live set comes from the identity locks — `ls ledger/locks/shepherd-*.lock`, skipping
+`*.reclaim.lock`, each resolved through its pane/session (adapter R7). A lock whose
+holder is gone was already swept at step 3, so what remains and answers is the live set
 (`docs/specs/multi-shepherd-design.md` §9 step 7).
 
 ## Done when

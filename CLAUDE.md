@@ -110,7 +110,7 @@ fi
 
 Run `rev-parse` first, and keep both redirects. `cat-file -e` exits **128 for a missing path and for a ref that does not exist alike**, and writes `fatal:` to stderr — so a checkout that has never fetched `origin/<dev-branch>` reads as "no working agreement" unless the ref is confirmed separately (measured on git 2.43.0; `-e` is "verify its existence", git-cat-file.adoc, read 2026-08-23).
 
-`linear-session:` and `linear-event:` sit under `created:` and are set only when a card's source is the Linear inbox (§3); every other card carries `none`. `linear-session:` is what lets retro answer in the thread the request came from, hours later and in a fresh context — losing it would leave that answer with nowhere to go.
+`linear-session:` and `linear-event:` sit under `created:` and are set only when a card's source is the Linear inbox (§3); every other card carries `none`. The **triage** skill (§4 step 2) has the why.
 
 `captured` vs `queued` is load-bearing, not cosmetic: **`queued` means "dispatch me when a slot frees"** — retro's step 7 and the dispatch skill both pick the oldest queued card for a project automatically. **`captured` is the backlog**: a real card with a live Brief that nobody has scheduled. Park a task the operator has deprioritised in `captured`, never in `queued`, or a later close-out will start it on its own. Promote it back to `queued` only on their word.
 

@@ -310,4 +310,22 @@ assert_ok "the drain acks, and says why it cannot wait for retro" \
 assert_ok "CLAUDE.md names the inbox config file" \
   grep -q 'config/shepherd/inbox.env' "$ROOT/CLAUDE.md"
 
+# --- fix round 1 findings 3 and 5: two gaps a later edit could quietly drop -
+# Finding 3: step 8 arms on cmd_owner's exit 1 as well as exit 0 (cmd_watch
+# tolerates an unreachable /health the same way), and step 10's status line
+# has a slot to report the inbox watcher's state at all.
+assert_ok "wake step 8 covers cmd_owner's exit 1 without disagreeing with watch" \
+  grep -q "the pre-check must not bail where the watcher itself" "$ROOT/.claude/skills/wake/SKILL.md"
+assert_ok "wake step 10 reports the inbox watcher's state" \
+  grep -q "inbox watcher's state" "$ROOT/.claude/skills/wake/SKILL.md"
+
+# Finding 5: the drain, not triage, matches a Linear reply to the live card
+# it belongs to - triage §5 only ever triggers on a named T-NNNN, which a
+# Linear reply never carries. Losing this match silently reopens every reply
+# on a live card as brand-new work.
+assert_ok "the drain matches a reply's session_id against a live card's linear-session:" \
+  grep -qF 'xargs -r grep -lE "^state: (briefed|working|blocked)"' "$ROOT/.claude/skills/monitor/SKILL.md"
+assert_ok "a matched reply enters triage's amendment path with the card already identified" \
+  grep -q 'enter triage §5' "$ROOT/.claude/skills/monitor/SKILL.md"
+
 finish

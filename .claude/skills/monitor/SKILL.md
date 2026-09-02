@@ -9,11 +9,9 @@ description: Wake handler for worker events. Use whenever a background herdr wai
 
 **Ownership gate — run this before anything else.** Re-read `owner:` from the task card on disk. If it is not your `SHEPHERD_ID`, stand down silently: no verification, no reply, no re-arm, no commit. The card was reassigned (CLAUDE.md §4a) and its new owner is watching it. This check is what makes reassignment safe against a previous owner that wakes up late. **A card with no `owner:` line reads as `shepherd-1`** (CLAUDE.md §2 rule 10) — a card written before the field existed would otherwise be watched by nobody at all.
 
-A background watcher task exited — the status-file watcher (exit 0 = terminal claim written; 124 = heartbeat backstop — 30m S/M, 60m L/heavy per adapter R5) or the herdr `blocked` stall watcher (exit 0 = worker stuck on a prompt; 1 = its own timeout) — or you were asked to check a worker.
+A background watcher task exited — the status-file watcher (exit 0 = terminal claim written; 124 = heartbeat backstop — 30m S/M, 60m L/heavy per adapter R5) or the herdr `blocked` stall watcher (exit 0 = worker stuck on a prompt; 1 = its own timeout) — or you were asked to check a worker. Map the watcher to its task card first.
 
-The **inbox watcher** (`scripts/inbox.sh watch`) is the third: exit 0 means Linear has work — run `## Inbox drain` below instead of the verification ladder, which is about workers and has nothing to say about an inbox event. Exit 124 → re-arm and stop. Exit 1 or 3 → report, do not re-arm.
-
-Map the watcher to its task card first.
+The **inbox watcher** (`scripts/inbox.sh watch`) is the third, and has no card to map: exit 0 means Linear has work — run `## Inbox drain` below instead of the verification ladder, which is about workers and has nothing to say about an inbox event. Exit 124 → re-arm and stop. Exit 1 or 3 → report, do not re-arm.
 
 - **Wake for a task already closed or already being handled → no-op.** The sibling watcher always fires eventually; don't re-arm it, don't re-verify.
 - The operator may talk to a worker pane directly; those turns still append to the status file (the env vars live in the worker process). Reconcile from the file — unexpected extra activity is information, not an error.
@@ -31,7 +29,7 @@ Map the watcher to its task card first.
 | Verdict | Evidence | Action |
 |---|---|---|
 | **done** | claim done ∧ commits on branch ∧ DoD passes when you run it ∧ no prompt UI in tail | `state: review` → retro-lite (CLAUDE.md §3): learnings → memory/gotchas, History+Log updated, toast `--sound done`, retire the pane (R9 — close, never `/exit`), registry `active-task: none` under `card-<slug>` — card-lock protocol (acquire → re-read → edit → commit via `scripts/ledger-commit.sh` → release) — then **release the project lock**, then the handoff check (retro step 7 — tri-state liveness; CLAUDE.md §4a for the policy) |
-| **blocked** | status blocked, claim blocked, or tail shows a question | Read the actual question (R6, more lines if needed; for plan approvals read the worker's `.superpowers/` artifact in the project repo, not its summary). Decide per CLAUDE.md §4: **answer** → single-line reply via R4, decision logged to `decisions/`, re-arm R5; **escalate** → toast `--sound request` + tell the operator the question and your best guess; when the card carries a `linear-session:`, post the same question there too — `scripts/inbox.sh activity <session> elicitation "<the question>"` — so the operator can answer from the issue, and the reply returns as a `prompted` event on the next drain; several open decisions (this worker's or across workers) → one numbered round, each with a `➡️` recommendation, so one reply from the operator unblocks everything; `state: blocked`, arm a long wait (3600000) so a self-unblock still wakes you |
+| **blocked** | status blocked, claim blocked, or tail shows a question | Read the actual question (R6, more lines if needed; for plan approvals read the worker's `.superpowers/` artifact in the project repo, not its summary). Decide per CLAUDE.md §4: **answer** → single-line reply via R4, decision logged to `decisions/`, re-arm R5; **escalate** → toast `--sound request` + tell the operator the question and your best guess; when the card carries a real `linear-session:`, post the same question there too — `scripts/inbox.sh activity <session> elicitation "<the question>"` — so the operator can answer from the issue, and the reply returns as a `prompted` event on the next drain; several open decisions (this worker's or across workers) → one numbered round, each with a `➡️` recommendation, so one reply from the operator unblocks everything; `state: blocked`, arm a long wait (3600000) so a self-unblock still wakes you |
 | **overrun** | wall-clock past card `budget:`, still working | v0: note in Log + one line to the operator, re-arm (enforcement is deferred by design) |
 | **stalled** | heartbeat fired, status `working`, but no new status-file lines across two consecutive wakes | R6 inspect; if wedged, one nudge via R4 (`Status check - reply with your SHEPHERD status line`); still nothing next wake → escalate |
 | **lying** | claim done but git/DoD disagree, or DoD/test files were tampered with | `state: working`, reply via R4 naming the concrete gap (`Your done claim failed verification: <fact>. Fix and re-verify.`), Log it as a failed verification cycle, re-arm |
@@ -45,9 +43,22 @@ Map the watcher to its task card first.
 order, one at a time.
 
 An event is an **incoming message from the operator** that happens to have arrived on an
-issue instead of in this pane. Build it from the event's `issue.identifier`, `issue.title`
-and either `body` (a `prompted` or `comment_reply`) or `prompt_context` (a `created`), then
-run it through **triage** unchanged — same routing, same onboarded-only gate, same sizing.
+issue instead of in this pane. First check whether it is a reply to a card already in
+flight — a `prompted` event's `session_id` can match the `linear-session:` of a card
+that is `briefed`, `working` or `blocked`:
+
+```bash
+grep -l "^linear-session: <event-session-id>$" ledger/tasks/T-*.md \
+  | xargs -r grep -lE "^state: (briefed|working|blocked)"
+```
+
+A match → the drain has already identified the card; enter triage §5 (amendment) with it
+— this is the operator talking to a task in flight, and triage §5's own trigger (naming
+an existing `T-NNNN`) never fires for a Linear reply, so the drain is the only place that
+can make this match. No match → it is a new request: build it from the event's
+`issue.identifier`, `issue.title` and either `body` (a `prompted` or `comment_reply`) or
+`prompt_context` (a `created`), then run it through **triage** unchanged — same routing,
+same onboarded-only gate, same sizing.
 
 Then post the outcome back, and only then ack:
 
