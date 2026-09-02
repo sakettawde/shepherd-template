@@ -17,15 +17,23 @@ description: Close out a task after monitor verified it done (or declared it fai
 3. **Records** — registry `## History` one-liner (date, task, outcome, key fact) under `card-<slug>`, re-read and committed inside the lock; backfill `Outcome:` on this task's entries in `decisions/YYYY-MM-<your-shepherd-id>.md`.
 4. **Notify** — adapter R8 toast: done `--sound done` (or failed `--sound request`), plus a one-line summary to the operator in chat.
 
-   A card carrying a real `linear-session:` also gets its answer in Linear:
+   A card carrying a real `linear-session:` also gets its answer in Linear. Read the card's
+   `## Log` first and post only if no `linear: response posted` line is already there:
 
    ```bash
-   scripts/inbox.sh activity <linear-session> response "<the same one-line outcome the operator gets in chat>"
+   grep -q "linear: response posted" ledger/tasks/T-NNNN.md \
+     || scripts/inbox.sh activity <linear-session> response "<the same one-line outcome the operator gets in chat>"
    ```
 
-   This is what moves the Linear session to `complete`, so it happens once, at close-out, for
-   `failed` as much as for `done` — a task that failed still owes an answer to the person who
-   asked. Log it. Do not ack anything here: the drain acked the event when it created the card.
+   Then Log it as `HH:MM linear: response posted to <session>`. That posting is what moves the
+   Linear session to `complete`, so it happens **once**, at close-out, for `done`, `failed` and
+   `abandoned` alike — a task that was dropped or that failed still owes an answer to the
+   person who asked, and a session left open shows an agent that acknowledged and then went
+   permanently silent. The Log guard is what makes "once" survive a retro that is re-run or
+   that was interrupted after the posting; one card per session is the drain's job (monitor's
+   `## Inbox drain` matches a second event on a live session to the card it already has,
+   rather than carding it again). Do not ack anything here — the drain acked the event when it
+   created the card.
 5. **Worker pane** — retire it via adapter R9 safe-close: guards (task closed ∧ card's pane ∧ `w-` label ∧ idle ∧ session id matches card ∧ not focused) then `pane close`, which also ends the claude session. Never `/exit` first — `pane run` appends to input-box drafts and would submit them. Drafts never block retirement; discard silently. A failed guard → leave the pane, log which guard, retry on a later wake.
 6. **Release** — registry `active-task: none` and `pane: none` (if retired), or the Clones row's fields for a clone target; card `state: done|failed`. Take `card-<slug>` for the registry edit, commit inside the lock, release:
 

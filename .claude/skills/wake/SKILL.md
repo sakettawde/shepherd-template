@@ -142,18 +142,28 @@ instantly on the claim you already handled.
 decides whether this instance has one at all: exit 3 (no config, or the inbox serves
 another instance) → arm nothing and say so once in step 10's line. Exit 0 (this
 instance's inbox) or exit 1 (`/health` unreachable, or a response the check couldn't
-use) → arm as a background Bash task, bare, never piped — `cmd_watch` tolerates an
-unreachable `/health` the same way, falling through to its own poll loop and deciding on
-its own terms (adapter R5), so the pre-check must not bail where the watcher itself
-would carry on:
+use) → arm as a background Bash task, bare, never piped:
 
 ```bash
 scripts/inbox.sh watch 3600
 ```
 
-Exit 0 → run monitor's `## Inbox drain`. Exit 124 → re-arm, nothing else. Exit 1 or 3 →
-report it and do not re-arm; a watcher that can only fail is worse than none (adapter
-R5). The watcher heartbeats to the Worker as it polls, so nothing else has to.
+Arming on exit 1 is safe because the watcher settles ownership itself, inside its poll
+loop — on every heartbeat tick, and once more before it reports work. One box runs several
+instances against one `inbox.env` and one bearer token, and that token authenticates the
+inbox rather than the instance, so a watcher that decided ownership only at arm time would
+let a momentary `/health` outage hand a non-owner a full window on the owner's inbox: one
+event drained twice, into two cards and two workers. The loop exits 3 the moment the
+Worker names another instance.
+
+Exit 0 → run monitor's `## Inbox drain`. Exit 124 → re-arm, nothing else.
+**Exit 4 → re-arm, and say one line to the operator naming the Worker as
+unreachable**: the failure
+ceiling is transient — Cloudflare trouble, or a laptop resuming ahead of its Wi-Fi — and
+clears in minutes, but it is still an outage visible from Linear's side, so it is reported
+rather than swallowed. Exit 1 or 3 → report it and do not re-arm; a watcher that can only
+fail is worse than none (adapter R5). The watcher heartbeats to the Worker as it polls, so
+nothing else has to.
 
 ### 9. Your queue
 

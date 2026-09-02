@@ -21,7 +21,7 @@ fi
 
 # A worker running this probe inherits the live instance's environment. Clear
 # every variable the script reads, or a case silently tests the real inbox.
-unset SHEPHERD_INBOX_ENV INBOX_URL INBOX_TOKEN SHEPHERD_INBOX_POLL
+unset SHEPHERD_INBOX_ENV INBOX_URL INBOX_TOKEN SHEPHERD_INBOX_POLL SHEPHERD_INBOX_MAX_FAILURES
 
 TOKEN='tok-fixture-do-not-log'
 STUB="$SHEPHERD_ROOT/stub.py"
@@ -36,15 +36,29 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 REPLIES = sys.argv[1]
 LOG = sys.argv[2]
 
+def read_reply(f):
+    raw = open(f).read().split('\n', 1)
+    return int(raw[0]), (raw[1] if len(raw) > 1 else '')
+
 def reply_for(path):
     # A case drops <name>.json into REPLIES to script a route. The file's first
     # line is the status code, the rest is the body.
-    name = path.strip('/').replace('/', '_').split('?')[0] + '.json'
-    f = os.path.join(REPLIES, name)
+    stem = path.strip('/').replace('/', '_').split('?')[0]
+    # <stem>.onceN.json is a one-shot: served once, in queued order, then
+    # deleted, after which the persistent file has the route back. That is how
+    # a case makes one route answer differently on the first request than on
+    # the second — the shape every ownership-change case needs.
+    once = sorted((n for n in os.listdir(REPLIES) if n.startswith(stem + '.once')),
+                  key=lambda n: int(n[len(stem) + 5:-5]))
+    if once:
+        f = os.path.join(REPLIES, once[0])
+        code, out = read_reply(f)
+        os.remove(f)
+        return code, out
+    f = os.path.join(REPLIES, stem + '.json')
     if not os.path.exists(f):
         return 404, '{"error":"not found"}'
-    raw = open(f).read().split('\n', 1)
-    return int(raw[0]), (raw[1] if len(raw) > 1 else '')
+    return read_reply(f)
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -82,10 +96,16 @@ URL="http://127.0.0.1:$PORT"
 ENVFILE="$SHEPHERD_ROOT/inbox.env"
 printf 'INBOX_URL=%s\nINBOX_TOKEN=%s\n' "$URL" "$TOKEN" > "$ENVFILE"
 export SHEPHERD_INBOX_ENV="$ENVFILE"
-export SHEPHERD_ID=shepherd-collie
+export SHEPHERD_ID=shepherd-fixture
 
 route() { printf '%s\n%s' "$2" "$3" > "$REPLIES/$1.json"; }
+# route_once <name> <code> <body> — queued one-shot replies, served before the
+# persistent route and in the order queued.
+ONCE=0
+route_once() { ONCE=$((ONCE + 1)); printf '%s\n%s' "$2" "$3" > "$REPLIES/$1.once$ONCE.json"; }
+clear_once() { rm -f "$REPLIES"/*.once*.json; }
 last_request() { tail -n1 "$LOG"; }
+count_path() { grep -c "\"path\": \"$1\"" "$LOG"; }
 field() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get(sys.argv[1],""))' "$1"; }
 
 # --- pending ---------------------------------------------------------------
@@ -127,12 +147,12 @@ route heartbeat 200 '{"ok":true,"at":1}'
 assert_ok "heartbeat exits 0" "$SCRIPT" heartbeat
 assert_eq "heartbeat names this instance" \
   "$(last_request | field body | python3 -c 'import json,sys; print(json.load(sys.stdin)["shepherd_id"])')" \
-  "shepherd-collie"
+  "shepherd-fixture"
 
 # --- owner -----------------------------------------------------------------
-route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
+route health 200 '{"status":"ok","shepherd_id":"shepherd-fixture"}'
 assert_ok "owner exits 0 when the inbox serves this instance" "$SCRIPT" owner
-route health 200 '{"status":"ok","shepherd_id":"shepherd-kelpie"}'
+route health 200 '{"status":"ok","shepherd_id":"shepherd-other"}'
 "$SCRIPT" owner >/dev/null 2>&1; assert_eq "owner exits 3 for another instance's inbox" "$?" "3"
 assert_eq "owner does not authenticate" "$(last_request | field auth)" ""
 
@@ -147,7 +167,7 @@ out=$("$SCRIPT" pending)
 assert_eq "the -K-delivered bearer token still arrives at the Worker" \
   "$(last_request | field auth)" "Bearer $TOKEN"
 assert_eq "and the request still round-trips correctly" "$out" "9"
-route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
+route health 200 '{"status":"ok","shepherd_id":"shepherd-fixture"}'
 "$SCRIPT" owner >/dev/null 2>&1
 assert_eq "owner still sends no Authorization header after the api() change" \
   "$(last_request | field auth)" ""
@@ -168,7 +188,7 @@ route inbox_pending 200 '{"pending":0}'
 
 # --- watch -----------------------------------------------------------------
 export SHEPHERD_INBOX_POLL=1
-route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
+route health 200 '{"status":"ok","shepherd_id":"shepherd-fixture"}'
 
 route inbox_pending 200 '{"pending":0}'
 "$SCRIPT" watch 2 >/dev/null 2>&1
@@ -181,10 +201,10 @@ assert_eq "watch exits 0 as soon as something is pending" "$rc" "0"
 assert_ok "watch returns promptly rather than serving out its window" \
   test $(( $(date +%s) - start )) -lt 15
 
-route health 200 '{"status":"ok","shepherd_id":"shepherd-kelpie"}'
+route health 200 '{"status":"ok","shepherd_id":"shepherd-other"}'
 "$SCRIPT" watch 5 >/dev/null 2>&1
 assert_eq "watch exits 3 for another instance's inbox, and arms nothing" "$?" "3"
-route health 200 '{"status":"ok","shepherd_id":"shepherd-collie"}'
+route health 200 '{"status":"ok","shepherd_id":"shepherd-fixture"}'
 
 route inbox_pending 401 '{"error":"unauthorized"}'
 : > "$LOG"
@@ -219,5 +239,93 @@ route inbox_pending 200 '{"pending":42}'
 out=$("$SCRIPT" pending); rc=$?
 assert_eq "pending still prints the bare count after the pending_probe refactor" "$out" "42"
 assert_eq "pending still exits 0 after the pending_probe refactor" "$rc" "0"
+
+# --- ownership is re-checked inside the loop, not only before it -----------
+# Several instances share one box, one inbox.env and one bearer token, and that
+# token authenticates the inbox rather than the instance. The pre-check
+# deliberately tolerates an unreachable /health, so a 30-second Worker blip
+# during a non-owner's wake used to buy it a full window of polling the owner's
+# inbox — and when an event landed, both instances drained it into two cards
+# and two workers.
+export SHEPHERD_INBOX_POLL=1
+clear_once
+route health 200 '{"status":"ok","shepherd_id":"shepherd-other"}'
+route_once health 503 '{"error":"unavailable"}'      # what the pre-check sees
+route inbox_pending 200 '{"pending":1}'
+: > "$LOG"
+"$SCRIPT" watch 30 >/dev/null 2>&1; rc=$?
+assert_eq "an unreachable /health at arm time never becomes a licence to drain" "$rc" "3"
+assert_ok "because ownership is asked again inside the loop, not only before it" \
+  test "$(count_path /health)" -ge 2
+assert_eq "and nothing was posted to the other instance's Linear sessions" \
+  "$(grep -c '/activity' "$LOG")" "0"
+
+# The pre-drain gate is separate from the heartbeat-tick gate: between two ticks
+# only this one stands between a stolen inbox and a drain. Three scripted
+# /health answers walk the watcher to it — pre-check, tick, then the gate.
+clear_once
+route_once health 200 '{"status":"ok","shepherd_id":"shepherd-fixture"}'
+route_once health 200 '{"status":"ok","shepherd_id":"shepherd-fixture"}'
+route_once health 200 '{"status":"ok","shepherd_id":"shepherd-other"}'
+: > "$LOG"
+"$SCRIPT" watch 30 >/dev/null 2>&1; rc=$?
+assert_eq "the gate before exit 0 refuses a drain the owner changed under" "$rc" "3"
+assert_eq "and it runs after the pending probe, which is the only place it helps" \
+  "$(last_request | field path)" "/health"
+
+clear_once
+route health 200 '{"status":"ok","shepherd_id":"shepherd-fixture"}'
+
+# --- a busy inbox still heartbeats -----------------------------------------
+# The loop returns the moment work is pending, so a heartbeat that fired only
+# every fifth poll never fired at all on a busy inbox — the Worker's "shepherd
+# was last online N ago" text went stale exactly when shepherd was busiest.
+route inbox_pending 200 '{"pending":2}'
+: > "$LOG"
+"$SCRIPT" watch 30 >/dev/null 2>&1; rc=$?
+assert_eq "a pending count still ends the watch at once" "$rc" "0"
+assert_ok "and the first poll heartbeats, so a busy inbox is not a silent one" \
+  test "$(count_path /heartbeat)" -ge 1
+
+# --- the failure ceiling is transient, not terminal ------------------------
+# Ten minutes of Cloudflare trouble, or a laptop resuming ahead of its Wi-Fi,
+# used to exit 1 — which wake and monitor both read as "report, do not re-arm",
+# retiring Linear intake and the heartbeat for the rest of the session.
+export SHEPHERD_INBOX_MAX_FAILURES=3
+route inbox_pending 503 '{"error":"unavailable"}'
+: > "$LOG"
+"$SCRIPT" watch 60 >/dev/null 2>&1; rc=$?
+assert_eq "an unreachable Worker exhausts the ceiling as 4 (transient), not 1" "$rc" "4"
+assert_eq "and it spent the whole ceiling before saying so" "$(count_path /inbox/pending)" "3"
+
+# A 2xx whose body is not the JSON we asked for is the second road to the same
+# place: PENDING comes back empty, and reading that as "nothing pending" would
+# spin the window out against a Worker answering nonsense.
+route inbox_pending 200 'this is not json'
+: > "$LOG"
+"$SCRIPT" watch 60 >/dev/null 2>&1; rc=$?
+assert_eq "a 2xx with an unusable body is a failure, not a quiet zero" "$rc" "4"
+assert_eq "and it feeds the same ceiling rather than polling the window away" \
+  "$(count_path /inbox/pending)" "3"
+unset SHEPHERD_INBOX_MAX_FAILURES
+
+# --- the token is checked before it reaches a curl -K line -----------------
+# api() interpolates the token into `header = "Authorization: Bearer <token>"`.
+# A double quote, a backslash or a newline in the value would end that string
+# early and let the rest of it become a second header.
+for bad in 'tok with space' 'tok"quoted' 'tok\backslashed'; do
+  printf 'INBOX_URL=%s\nINBOX_TOKEN=%s\n' "$URL" "$bad" > "$SHEPHERD_ROOT/bad.env"
+  : > "$LOG"
+  err=$(SHEPHERD_INBOX_ENV="$SHEPHERD_ROOT/bad.env" "$SCRIPT" pending 2>&1); rc=$?
+  assert_eq "a token holding [$bad] exits 3" "$rc" "3"
+  case $err in *whitespace*)
+    ok "the refusal for [$bad] names the constraint" ;;
+  *) fail "the refusal for [$bad] names the constraint" "got [$err]" ;; esac
+  case $err in *"$bad"*)
+    fail "the refusal for [$bad] withholds the value" "the value was printed" ;;
+  *) ok "the refusal for [$bad] withholds the value" ;; esac
+  assert_eq "and nothing carrying [$bad] ever left for the Worker" \
+    "$(wc -l < "$LOG")" "0"
+done
 
 finish

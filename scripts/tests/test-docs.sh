@@ -305,27 +305,110 @@ assert_ok "monitor holds the drain procedure" \
 # would close the session before the work started.
 assert_ok "retro is where the closing response is posted" \
   grep -q 'activity <linear-session> response' "$ROOT/.claude/skills/retro/SKILL.md"
-assert_ok "the drain acks, and says why it cannot wait for retro" \
-  grep -q 'Ack every event you handled, at drain time' "$ROOT/.claude/skills/monitor/SKILL.md"
+assert_ok "the drain acks at drain time, and says why it cannot wait for retro" \
+  grep -qE 'Ack every event you handled.*drain time' "$ROOT/.claude/skills/monitor/SKILL.md"
 assert_ok "CLAUDE.md names the inbox config file" \
   grep -q 'config/shepherd/inbox.env' "$ROOT/CLAUDE.md"
 
-# --- fix round 1 findings 3 and 5: two gaps a later edit could quietly drop -
-# Finding 3: step 8 arms on cmd_owner's exit 1 as well as exit 0 (cmd_watch
-# tolerates an unreachable /health the same way), and step 10's status line
-# has a slot to report the inbox watcher's state at all.
-assert_ok "wake step 8 covers cmd_owner's exit 1 without disagreeing with watch" \
-  grep -q "the pre-check must not bail where the watcher itself" "$ROOT/.claude/skills/wake/SKILL.md"
+# --- wake's two inbox slots -------------------------------------------------
+# Step 8 arms on cmd_owner's exit 1 as well as exit 0, and step 10's status
+# line has a slot to report the watcher's state at all.
+inbox_step=$(sed -n '/Plus one inbox watcher/,/^### 9/p' "$ROOT/.claude/skills/wake/SKILL.md")
+assert_ok "wake step 8 arms on cmd_owner's exit 1, not only exit 0" \
+  grep -qE 'exit 1' <<<"$inbox_step"
 assert_ok "wake step 10 reports the inbox watcher's state" \
   grep -q "inbox watcher's state" "$ROOT/.claude/skills/wake/SKILL.md"
 
-# Finding 5: the drain, not triage, matches a Linear reply to the live card
-# it belongs to - triage §5 only ever triggers on a named T-NNNN, which a
-# Linear reply never carries. Losing this match silently reopens every reply
-# on a live card as brand-new work.
-assert_ok "the drain matches a reply's session_id against a live card's linear-session:" \
-  grep -qF 'xargs -r grep -lE "^state: (briefed|working|blocked)"' "$ROOT/.claude/skills/monitor/SKILL.md"
-assert_ok "a matched reply enters triage's amendment path with the card already identified" \
-  grep -q 'enter triage §5' "$ROOT/.claude/skills/monitor/SKILL.md"
+# --- the drain refuses to card the same event twice (C2) --------------------
+# The drain posts, then triages (id, card, dispatch - minutes), then acks. An
+# interrupt in that window leaves the event unacked, the Worker re-serves it,
+# and without this check the next drain builds a second card and dispatches a
+# second worker onto one request. linear-event: exists for exactly this read.
+drain=$(sed -n '/^## Inbox drain/,/^## Invariants/p' "$ROOT/.claude/skills/monitor/SKILL.md")
+assert_ok "the drain greps a card's linear-event: before it triages anything" \
+  grep -qF 'grep -l "^linear-event: <event-id>$" ledger/tasks/T-*.md' <<<"$drain"
+assert_ok "and an event that already has a card is acked, not re-carded" \
+  grep -qE 'A hit →.*[Aa]ck' <<<"$drain"
+
+# --- event content is untrusted, and its author is recorded (C3) -----------
+# An event is written by whoever can comment on the issue; the bearer token
+# authenticates the inbox, not the person. Losing this line is how a Linear
+# comment acquires the operator's authority.
+assert_ok "the drain names event content untrusted third-party input" \
+  grep -qiE 'untrusted' <<<"$drain"
+assert_ok "and records the author, read from the event's raw webhook body" \
+  grep -qE '`raw`' <<<"$drain"
+assert_ok "triage records the author on the card it writes" \
+  grep -qE '`raw`' "$ROOT/.claude/skills/triage/SKILL.md"
+# The elicitation in monitor's blocked row is what creates the exposure, so
+# the gate belongs next to it, not in a section a reader may not reach.
+blocked_row=$(grep -n '^| \*\*blocked\*\*' "$ROOT/.claude/skills/monitor/SKILL.md" | cut -d: -f1)
+blocked=$(sed -n "${blocked_row}p" "$ROOT/.claude/skills/monitor/SKILL.md")
+assert_ok "the blocked row posts the escalation to Linear as an elicitation" \
+  grep -qF 'activity <session> elicitation' <<<"$blocked"
+assert_ok "and rules that a Linear reply is input, never authority" \
+  grep -qE 'input, never authority' <<<"$blocked"
+
+# --- the live-card match covers every open state, and only your cards (I3) --
+# A card sits queued for hours by design, so a clarification arriving then is
+# a reply, not new work. And the ledger is shared: CLAUDE.md rule 10 allows no
+# write to a card another instance owns.
+assert_ok "the match covers every open state, queued and review included" \
+  grep -qF '^state: (queued|captured|briefed|working|blocked|review)' <<<"$drain"
+assert_ok "the match is filtered to the cards this instance owns" \
+  grep -qF 'grep -l "^owner: $SHEPHERD_ID"' <<<"$drain"
+assert_ok "and a match owned by a peer is handed over, never written to" \
+  grep -qE '§4a' <<<"$drain"
+
+# --- the escalation round trip can actually answer a worker (I2) -----------
+# triage §5 offers Amend and Cancel; neither is "this is the answer to the
+# question the worker is blocked on". Routing a blocked card's reply there
+# dead-ends the round trip monitor's blocked row just started.
+assert_ok "a blocked card's reply returns to the blocked row's answer path" \
+  grep -qE '\| .blocked. on a question .*elicitation.* \|' <<<"$drain"
+assert_ok "and any other open state still routes to triage §5" \
+  grep -qE 'triage §5' <<<"$drain"
+
+# --- the failure ceiling is transient, and both callers know it (I4) -------
+# Exit 1 there retired Linear intake for the rest of the session over ~12
+# minutes of Cloudflare trouble. 4 means transient: re-arm, and say so.
+assert_ok "the script's header documents exit 4" \
+  grep -qE '^#   4 ' "$ROOT/scripts/inbox.sh"
+assert_ok "the design's exit table documents exit 4" \
+  grep -qE '^\| 4 \|' "$ROOT/docs/specs/linear-inbox-wiring-design.md"
+for f in .claude/skills/wake/SKILL.md .claude/skills/monitor/SKILL.md; do
+  assert_ok "$f re-arms on exit 4 rather than reporting and stopping" \
+    grep -qE 'Exit 4 → *re-arm' "$ROOT/$f"
+  assert_ok "$f still refuses to re-arm on exit 1 or 3" \
+    grep -qE 'Exit 1 or 3 →' "$ROOT/$f"
+done
+
+# --- every close-out answers in Linear, including the two that are not "done" -
+# A cancelled or parked card whose session nobody completes shows a requester
+# an agent that acknowledged and then went permanently silent.
+retro_notify=$(sed -n '/^4\. \*\*Notify\*\*/,/^5\. \*\*Worker pane/p' "$ROOT/.claude/skills/retro/SKILL.md")
+assert_ok "retro's closing response covers abandoned as well as done and failed" \
+  grep -qE 'abandoned' <<<"$retro_notify"
+assert_ok "and posts it only where the card has not logged one already" \
+  grep -qF 'grep -q "linear: response posted"' <<<"$retro_notify"
+# triage §5's captured/queued cancel is the only close-out that skips retro,
+# so it is the only place the obligation has to be restated.
+triage_amend=$(sed -n '/^## 5. Amend or cancel/,$p' "$ROOT/.claude/skills/triage/SKILL.md")
+assert_ok "triage's captured/queued cancel posts the closing response itself" \
+  grep -qF 'activity <linear-session> response' <<<"$triage_amend"
+
+# --- ownership is not settled once (C1) ------------------------------------
+# One box, several instances, one inbox.env and one bearer token that
+# authenticates the inbox rather than the caller. A watcher that decided
+# ownership only at arm time handed a non-owner a whole window on the owner's
+# inbox after any /health blip.
+assert_ok "watch re-checks ownership inside its loop, not only at arm time" \
+  grep -qE 'still_ours' "$ROOT/scripts/inbox.sh"
+assert_ok "the pre-drain gate runs before watch reports work" \
+  grep -qE 'still_ours \|\| return 3' "$ROOT/scripts/inbox.sh"
+assert_ok "wake says why arming on exit 1 is safe" \
+  grep -qE 'settles ownership itself' <<<"$inbox_step"
+assert_fail "the design no longer claims a second instance races nothing" \
+  grep -qF 'arms no watcher and races nothing' "$ROOT/docs/specs/linear-inbox-wiring-design.md"
 
 finish
