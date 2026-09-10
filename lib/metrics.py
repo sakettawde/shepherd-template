@@ -160,7 +160,7 @@ def last_metrics_line(log):
     """The last Log line carrying `metrics:` — the close-out line retro wrote.
 
     A Log line starts with `- HH:MM` or, in 16 live cards, the bare `HH:MM` of
-    CLAUDE.md §5; both count. Anything else carrying the word is prose.
+    the manual §5; both count. Anything else carrying the word is prose.
     """
     found = None
     for line in log.splitlines():
@@ -394,7 +394,7 @@ def measure_blocked(status, active_hours, now):
 
 INBOX_LOG = os.path.join("ledger", "inbox.log")
 INBOX_COLUMNS = ("start", "id", "session", "kind", "intent", "trust", "outcome", "received", "first")
-OUTCOME_WORD = re.compile(r"^(answered|asked|refused|ignored|(?:carded|routed|held):T-\d{4})$")   # what inbox.sh log writes
+OUTCOME_WORD = re.compile(r"^(answered|asked|refused|ignored|(?:carded|routed|held):T-\d{4})$")   # what shepherd-inbox log writes
 TRUST_WORDS = ("operator", "member", "unknown")
 FINAL_WORD = ("answered", "refused")      # the first word was the last: a refusal is a response
 OPEN_OUTCOMES = ("carded", "routed", "held")
@@ -741,7 +741,7 @@ def measure_decisions(root, since_utc, now):
 
 def adapter_reference(root=None):
     """The herdr adapter reference that is actually loaded: the highest-versioned
-    `references/v*.md`. CLAUDE.md §7 pins one version and keeps the older files
+    `references/v*.md`. the manual §7 pins one version and keeps the older files
     beside it for historical diffs, so a hard-coded filename would quietly read a
     stale 9.6k-token file after the next upgrade instead of reporting it missing.
     Versions compare numerically, so v0.10.0 beats v0.8.2 — lexical order does not.

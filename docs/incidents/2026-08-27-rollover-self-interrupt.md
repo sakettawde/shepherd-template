@@ -4,7 +4,7 @@
 
 ## What happened
 
-Two rollovers died at the tool call and the cause was guessed at twice. The foreground `context-rollover.sh` sent `pane send-keys <own-pane> Escape` while running as shepherd's own Bash tool call. **Claude Code reads an Escape into its own pane as "interrupt the running tool"**, and the running tool was the call carrying the script. The pane showed `Bash interrupted`, the watchdog was never armed, the `/clear` never went out, and the instance sat idle with no watchers for hours — looking exactly like a permission block, and being nothing of the kind.
+Two rollovers died at the tool call and the cause was guessed at twice. The foreground `shepherd-rollover` sent `pane send-keys <own-pane> Escape` while running as shepherd's own Bash tool call. **Claude Code reads an Escape into its own pane as "interrupt the running tool"**, and the running tool was the call carrying the script. The pane showed `Bash interrupted`, the watchdog was never armed, the `/clear` never went out, and the instance sat idle with no watchers for hours — looking exactly like a permission block, and being nothing of the kind.
 
 ## What changed
 
@@ -12,4 +12,4 @@ The foreground call is **read-only**: it runs `pane get` and `pane read`, logs w
 
 ## Where the rule stands
 
-CLAUDE.md §8 (foreground read-only, keystrokes from the detached watchdog); adapter R10; memory `rollover-self-interrupt`.
+the manual §8 (foreground read-only, keystrokes from the detached watchdog); adapter R10; memory `rollover-self-interrupt`.

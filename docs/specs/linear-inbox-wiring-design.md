@@ -307,5 +307,5 @@ through `shepherd-commit`, on `main`.
   session states each produces.
 - https://linear.app/developers/agent-best-practices, read 2026-09-02 — 10-second first
   activity, 30-minute stale window, which type ends the work.
-- `.claude/skills/herdr-adapter/references/v0.8.2.md` R5, read 2026-09-02 — watcher shape and
+- `skills/herdr-adapter/references/v0.8.2.md` R5, read 2026-09-02 — watcher shape and
   the rule against a watcher that can only time out.

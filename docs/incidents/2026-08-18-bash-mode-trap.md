@@ -8,8 +8,8 @@ Saket's last input in the shepherd pane had used the `!` prefix, so the input bo
 
 ## What changed
 
-`scripts/context-rollover.sh` handles it without judgement on shepherd's part: the detached watchdog sends `Escape`, re-reads the prompt box and proves it is back in prompt mode (measured: `Escape` reliably restores `❯`), refuses only if it is still in bash mode, and then submits `/clear`. Arrival of the recovery prompt is confirmed from the fresh session's transcript, never from `agent prompt`'s return value. By hand, `herdr pane send-keys <pane> Escape` clears the box, and asking Saket to type `/clear` himself always works.
+`shepherd-rollover` handles it without judgement on shepherd's part: the detached watchdog sends `Escape`, re-reads the prompt box and proves it is back in prompt mode (measured: `Escape` reliably restores `❯`), refuses only if it is still in bash mode, and then submits `/clear`. Arrival of the recovery prompt is confirmed from the fresh session's transcript, never from `agent prompt`'s return value. By hand, `herdr pane send-keys <pane> Escape` clears the box, and asking Saket to type `/clear` himself always works.
 
 ## Where the rule stands
 
-Adapter R10 ("its return value is never evidence"); CLAUDE.md §8's rollover invariants; `docs/specs/context-rollover-design.md`.
+Adapter R10 ("its return value is never evidence"); the manual §8's rollover invariants; `docs/specs/context-rollover-design.md`.

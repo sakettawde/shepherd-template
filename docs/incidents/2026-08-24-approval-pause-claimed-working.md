@@ -8,8 +8,8 @@ A worker paused for a design approval and ended its turn `SHEPHERD: working — 
 
 ## What changed
 
-The template's `### Status protocol` sorts the claims by what happens next and names approval as a `blocked` case: **`blocked`** — you need shepherd input to continue (a design approval, an answer, a ruling, a permission); **`working`** — you continue on your own next turn, a checkpoint, never terminal. It states the cost, because the why is what makes the rule survive a worker under pressure: shepherd wakes on `blocked` within seconds and on `working` only at the next heartbeat. The canonical statement lives in the template because the card is the only surface a worker reads; CLAUDE.md §6, monitor and onboard state the rule in a sentence and point home.
+The template's `### Status protocol` sorts the claims by what happens next and names approval as a `blocked` case: **`blocked`** — you need shepherd input to continue (a design approval, an answer, a ruling, a permission); **`working`** — you continue on your own next turn, a checkpoint, never terminal. It states the cost, because the why is what makes the rule survive a worker under pressure: shepherd wakes on `blocked` within seconds and on `working` only at the next heartbeat. The canonical statement lives in the template because the card is the only surface a worker reads; the manual §6, monitor and onboard state the rule in a sentence and point home.
 
 ## Where the rule stands
 
-`templates/task-card.md` `### Status protocol` (canonical); `docs/protocols.md` § Status protocol; CLAUDE.md §6.
+`templates/task-card.md` `### Status protocol` (canonical); `docs/protocols.md` § Status protocol; the manual §6.

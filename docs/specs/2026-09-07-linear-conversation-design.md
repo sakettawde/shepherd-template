@@ -45,14 +45,14 @@ CLAUDE.md §2 rule 11 fires, `uncited — <the trigger that did not fire>` where
   (Worker `src/sessions.ts` and `shepherd-inbox cmd_activity`, read 2026-09-07). Its
   comment filter keeps only replies whose parent comment the app authored.
 - **Shepherd** arms `shepherd-inbox watch 21600` at wake, drains through
-  `.claude/skills/monitor/references/inbox-drain.md`, triages each event as a pane message, posts
+  `skills/monitor/references/inbox-drain.md`, triages each event as a pane message, posts
   the post-back matrix's activity, acks, and completes the session from retro step 4.
 
 ## 1. Intents
 
 Triage stays the one intake (§8 keeps the no-fifth-skill constraint); what changes is that a Linear
 message is first read for **intent**, and the intent picks the handler and the shape of the first
-word. The table is the whole taxonomy; `.claude/skills/triage/references/linear-intents.md` will
+word. The table is the whole taxonomy; `skills/triage/references/linear-intents.md` will
 carry it, and triage §4's Linear branch will point there.
 
 **Which activity type a word takes is decided by the session, not the intent.** `response`
@@ -560,28 +560,28 @@ wiring design already names.
 | `shepherd-metrics`, `scripts/lib/metrics.py` | `inbox` measure over `ledger/inbox.log` | C2 |
 | `shepherd-wake-report` | `INBOX` line reports an empty `operator_ids` | C2 |
 | `scripts/tests/test-inbox.sh`, `test-watch.sh`, `test-metrics.sh`, `test-wake-report.sh` | the verbs, the kind, the measure, the line | C2 |
-| `.claude/skills/triage/SKILL.md` §4 + new `references/linear-intents.md` | the intent table; session decides the type; delegation vs mention; ambiguity → `select`; non-operator builds `captured`; `linear-author:` written | C3a |
-| `.claude/skills/monitor/references/inbox-drain.md` | trust gate before the body; intent first; first-word rules; the log line; `stop` → cancel | C3a |
-| `.claude/skills/monitor/SKILL.md` | blocked row: operator reply = pane answer, non-operator = input + toast; trigger line and re-arm invariant → `shepherd-watch arm inbox` and its verdicts | C3a |
-| `.claude/skills/wake/SKILL.md` step 8 | arm through `shepherd-watch arm inbox` | C3a |
+| `skills/triage/SKILL.md` §4 + new `references/linear-intents.md` | the intent table; session decides the type; delegation vs mention; ambiguity → `select`; non-operator builds `captured`; `linear-author:` written | C3a |
+| `skills/monitor/references/inbox-drain.md` | trust gate before the body; intent first; first-word rules; the log line; `stop` → cancel | C3a |
+| `skills/monitor/SKILL.md` | blocked row: operator reply = pane answer, non-operator = input + toast; trigger line and re-arm invariant → `shepherd-watch arm inbox` and its verdicts | C3a |
+| `skills/wake/SKILL.md` step 8 | arm through `shepherd-watch arm inbox` | C3a |
 | `${CLAUDE_PLUGIN_ROOT}/docs/protocols.md` | § Linear voice | C3a |
 | `CLAUDE.md` §3 | the intake sentence; `shepherd-watch arm inbox` | C3a |
 | `${CLAUDE_PLUGIN_ROOT}/templates/task-card.md` | `linear-author:` | C3a |
 | `scripts/tests/test-docs.sh` | pins: intent table, trust gate wording, voice rules, the arm command (replacing the `shepherd-inbox watch 21600` pins) | C3a |
-| `.claude/skills/dispatch/SKILL.md`, `monitor/SKILL.md` transitions, `retro/SKILL.md` step 4 and §5 cancel | milestone `thought`s; `action` per DoD run at review; close-out `response` with `externalUrls`, or the where-it-now-lives line for `preview: none`; the `answered` log line | C3b |
+| `skills/dispatch/SKILL.md`, `monitor/SKILL.md` transitions, `retro/SKILL.md` step 4 and §5 cancel | milestone `thought`s; `action` per DoD run at review; close-out `response` with `externalUrls`, or the where-it-now-lives line for `preview: none`; the `answered` log line | C3b |
 | `CLAUDE.md` §1 | the clause and the boundary | C3b |
 | `scripts/tests/test-docs.sh` | pins: milestone posts, close-out shape | C3b |
 | `${CLAUDE_PLUGIN_ROOT}/templates/task-card.md`, new `${CLAUDE_PLUGIN_ROOT}/templates/reply-card.md` | `kind:`; the reply card | C4a |
 | `shepherd-preflight`, `scripts/tests/test-preflight.sh` | `kind: reply` branch: no lock, no FIFO, no lane gates, slot claimed; siblings skip reply cards | C4a |
-| `.claude/skills/dispatch/SKILL.md` step 0 and launch, adapter R3 | reply lane creation; launch flags and `SHEPHERD_WORKER_KIND` | C4a |
+| `skills/dispatch/SKILL.md` step 0 and launch, adapter R3 | reply lane creation; launch flags and `SHEPHERD_WORKER_KIND` | C4a |
 | `${CLAUDE_PLUGIN_ROOT}/hooks/worker-git-guardrail.sh`, `scripts/tests/test-guardrail.sh` | reply mode refuses push, commit and deploy verbs | C4a |
 | `scripts/bin/shepherd-reply`, `scripts/tests/test-status.sh` | `## Reply` delivery and the `reply` event | C4a |
-| `.claude/skills/monitor/SKILL.md`, `retro/SKILL.md` | the reply verification ladder; reply close-out (post, worktree removal, no lock) | C4b |
+| `skills/monitor/SKILL.md`, `retro/SKILL.md` | the reply verification ladder; reply close-out (post, worktree removal, no lock) | C4b |
 | `${CLAUDE_PLUGIN_ROOT}/docs/protocols.md` | § Reply workers; § Lanes one sentence | C4b |
 | `CLAUDE.md` §6 | the reply-worker bullet | C4b |
 | `scripts/tests/test-docs.sh` | pins: ladder, close-out, the protocols sections | C4b |
-| `${CLAUDE_PLUGIN_ROOT}/templates/registry-card.md`, `.claude/skills/onboard/SKILL.md` | `preview:` field and the onboarding question | C5 |
-| `.claude/skills/triage/SKILL.md` | the build-with-preview DoD line | C5 |
+| `${CLAUDE_PLUGIN_ROOT}/templates/registry-card.md`, `skills/onboard/SKILL.md` | `preview:` field and the onboarding question | C5 |
+| `skills/triage/SKILL.md` | the build-with-preview DoD line | C5 |
 | `registry/projects/*.md` (instance state, shepherd's own act at C5's close-out) | `preview:` on the five named projects, three of them `none` | C5 |
 
 ## 10. Proposed cards

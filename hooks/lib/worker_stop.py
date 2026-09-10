@@ -11,7 +11,7 @@ import shepherd_status as st  # noqa: E402
 # The sentinel is a LINE, and only the last one counts. Matching anywhere in
 # the message records a claim from a worker that merely wrote *about* one
 # (T-0093). `working` is admitted as a non-terminal checkpoint - the watcher
-# (scripts/watch.sh) never wakes on it.
+# (shepherd-watch) never wakes on it.
 #
 # Everything a worker has been seen to put in front of the sentinel is
 # skipped: blockquote `>`, a `-`/`*`/`+` bullet, a `1.` number, and up to four
@@ -36,7 +36,7 @@ CLAIMS = ("done", "blocked", "failed", "working")
 # The decoration tolerated is the sentinel's, for the same reason.
 #
 # `claim_source: printed` is what makes this cheap: shepherd verifies every
-# claim from four sources anyway (CLAUDE.md §2 rule 1), so a wrong printed
+# claim from four sources anyway (the manual §2 rule 1), so a wrong printed
 # claim costs one verification wake while a missed one costs two heartbeats.
 # That trade only holds against `none`, which is why this path is the LAST one
 # main() tries - see there.

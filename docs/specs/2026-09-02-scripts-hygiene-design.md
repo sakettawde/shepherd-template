@@ -14,7 +14,7 @@ step, exit 0 only when every step passed.
 
 | step | does | recipe |
 |---|---|---|
-| `gate` | `HERDR_ENV=1`; `herdr --version` equals the pin read from `.claude/skills/herdr-adapter/SKILL.md` (`**Pinned version: X**`); `herdr status` says `compatible: yes`; `~/.claude/settings.json` registers a `Stop` hook whose command ends in `worker-stop.sh'`; `HERDR_PANE_ID` set; `claude` on PATH | R1 |
+| `gate` | `HERDR_ENV=1`; `herdr --version` equals the pin read from `skills/herdr-adapter/SKILL.md` (`**Pinned version: X**`); `herdr status` says `compatible: yes`; `~/.claude/settings.json` registers a `Stop` hook whose command ends in `worker-stop.sh'`; `HERDR_PANE_ID` set; `claude` on PATH | R1 |
 | `pane` | `pane split --current --direction right --no-focus`, parse `result.pane.pane_id`, `pane rename <pid> w-smoke` | R2 |
 | `launch` | `pane run <pid> "cd <tmp>/work && SHEPHERD_TASK_ID=SMOKE-<hhmmss> SHEPHERD_STATUS_FILE=<tmp>/status.jsonl CLAUDE_CODE_SUBAGENT_MODEL=opus claude -n worker-SMOKE --model $SMOKE_MODEL --effort $SMOKE_EFFORT --permission-mode auto"`; poll `pane get` until `agent` is populated (the `agent wait` gotcha: it returns `agent_not_found` before detection); `agent wait <pid> --until idle --until blocked --timeout 45000`; if `blocked` and the visible pane mentions `trust`, `pane send-keys <pid> Enter` and wait for `idle` again (the brand-new-directory dialog, adapter Gotchas); any other `blocked` fails the step and prints the pane | R3, R6 |
 | `kickoff` | `agent prompt <pid> "<one-line task>" --wait --until working --timeout 15000`. `agent_blocked` fails the step (pane printed); `agent_prompt_stalled`/`timeout` do not — the status file decides | R4 |
@@ -118,7 +118,7 @@ References found (grep, 2026-09-02) and what happens to each:
 | `FRAMEWORK.md` file table, `scripts/**` row | drop "(+ a deprecated shim at its old path)"; add `shepherd-smoke`, `shepherd-statusline`, `statusline.py` |
 | `docs/specs/context-rollover-design.md` | already says the vocabulary was renamed; untouched |
 | `docs/superpowers/plans/2026-08-25-self-recycle-reliability.md` | historical plan; one line under its title: renamed to `shepherd-rollover` (T-0185), shim removed (T-0219) |
-| `.claude/skills/herdr-adapter/references/v0.7.4.md` | historical recipes kept for diffs, marked never-read; untouched |
+| `skills/herdr-adapter/references/v0.7.4.md` | historical recipes kept for diffs, marked never-read; untouched |
 | `docs/specs/2026-09-02-plugin-packaging-design.md` | already says the shim is dropped; untouched |
 | `ledger/`, `registry/`, `decisions/`, `docs/reports/` | instance state; untouched |
 
@@ -144,8 +144,8 @@ New: `shepherd-smoke`, `scripts/statusline.py`, `shepherd-statusline`,
 `scripts/tests/test-smoke.sh`, `scripts/tests/test-decide.sh`, `scripts/tests/test-statusline.sh`.
 Modified: `shepherd-rollover` (`decide` TASKS_DIR, stderr note, `--self-test`),
 `scripts/tests/run.sh`, `shepherd-drill` (header), `scripts/tests/test-rollover.sh`
-(F13/F14), `.claude/skills/herdr-adapter/SKILL.md` (Regeneration step 6),
-`.claude/skills/init-shepherd/SKILL.md` (new install step + Hard lines), `.claude/skills/wake/SKILL.md`
+(F13/F14), `skills/herdr-adapter/SKILL.md` (Regeneration step 6),
+`skills/init-shepherd/SKILL.md` (new install step + Hard lines), `skills/wake/SKILL.md`
 (step 10), `CLAUDE.md` §8 (the `unknown` bullet names the self-test), `FRAMEWORK.md` (file
 table row), `docs/superpowers/plans/2026-08-25-self-recycle-reliability.md` (one line).
 Deleted: `scripts/self-recycle.sh`.

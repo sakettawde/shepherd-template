@@ -14,4 +14,4 @@ The watchdog gates on the pane's **Claude session id changing** (`pane get` → 
 
 ## Where the rule stands
 
-CLAUDE.md §8 (the gate and the exit semantics); adapter R10; `docs/specs/context-rollover-design.md`; memory `own-pane-never-idle`.
+the manual §8 (the gate and the exit semantics); adapter R10; `docs/specs/context-rollover-design.md`; memory `own-pane-never-idle`.

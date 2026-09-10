@@ -662,12 +662,12 @@ and stands down without acting.
 | File | Change |
 |---|---|
 | `CLAUDE.md` | new `## 0. Operator` block (`id`, `worker-cap: 6`, `notifications`); §2 rule 3 rewritten around the cap and the project lock; §2 gains the multi-instance rule; §8 session start replaced by §9 |
-| `.claude/skills/triage/SKILL.md` | step 2 calls `shepherd-reserve`; sets `owner:`; card locks + commit-inside-lock for registry writes |
-| `.claude/skills/dispatch/SKILL.md` | `owner: <me>` filter on selection; `dispatch.lock` around count-and-claim; project lock; clone resolution |
-| `.claude/skills/monitor/SKILL.md` | re-read `owner:` at every wake, stand down if not mine |
-| `.claude/skills/retro/SKILL.md` | release project lock; owner-filtered next-dispatch + handoff notification; per-instance decision file; Clones row cleanup |
-| `.claude/skills/onboard/SKILL.md` | `card-_index.lock` around the registry index edit |
-| `.claude/skills/herdr-adapter/…` | R7 already returns `agent_session`; add the self-pane recipe used by §3.3 |
+| `skills/triage/SKILL.md` | step 2 calls `shepherd-reserve`; sets `owner:`; card locks + commit-inside-lock for registry writes |
+| `skills/dispatch/SKILL.md` | `owner: <me>` filter on selection; `dispatch.lock` around count-and-claim; project lock; clone resolution |
+| `skills/monitor/SKILL.md` | re-read `owner:` at every wake, stand down if not mine |
+| `skills/retro/SKILL.md` | release project lock; owner-filtered next-dispatch + handoff notification; per-instance decision file; Clones row cleanup |
+| `skills/onboard/SKILL.md` | `card-_index.lock` around the registry index edit |
+| `skills/herdr-adapter/…` | R7 already returns `agent_session`; add the self-pane recipe used by §3.3 |
 | `${CLAUDE_PLUGIN_ROOT}/templates/task-card.md` | `owner:` field |
 | `scripts/` | new: `shepherd-reserve`, `shepherd-lock`, `shepherd-commit` |
 | `.gitignore` | `ledger/locks/`, `ledger/shepherds/` |

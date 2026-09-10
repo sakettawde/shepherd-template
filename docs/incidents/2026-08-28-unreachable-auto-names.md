@@ -12,4 +12,4 @@ The canonical launch passes the same id three times: `SHEPHERD_ID=<id>` (who you
 
 ## Where the rule stands
 
-CLAUDE.md §1 (the launch line); `docs/protocols.md` § Ownership and handoff (addressing a peer); wake step 10.
+the manual §1 (the launch line); `docs/protocols.md` § Ownership and handoff (addressing a peer); wake step 10.

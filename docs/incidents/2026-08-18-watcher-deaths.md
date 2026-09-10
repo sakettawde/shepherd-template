@@ -8,8 +8,8 @@ The status-file watcher was a hand-typed grep loop anchored on `wc -l`. `wc -l` 
 
 ## What changed
 
-The recipe became code: `scripts/watch.sh` (T-0214) computes the anchor in Python over parsed records — the count of wake-worthy records, immune to the unterminated last line, needing no `|| echo 0` — and one predicate, `wake_count`, is read by both the anchor and the loop so the two can never drift. No skill restates the loop, and the test suite asserts that none carries a `grep -c`. Two rules survive in prose: a wait that can only ever time out is worse than no wait, because a heartbeat exit is indistinguishable from a healthy quiet task; and never pipe a watcher command, because a pipe reports the last command's exit status ([2026-08-22-t0093-cluster.md](2026-08-22-t0093-cluster.md)).
+The recipe became code: `shepherd-watch` (T-0214) computes the anchor in Python over parsed records — the count of wake-worthy records, immune to the unterminated last line, needing no `|| echo 0` — and one predicate, `wake_count`, is read by both the anchor and the loop so the two can never drift. No skill restates the loop, and the test suite asserts that none carries a `grep -c`. Two rules survive in prose: a wait that can only ever time out is worse than no wait, because a heartbeat exit is indistinguishable from a healthy quiet task; and never pipe a watcher command, because a pipe reports the last command's exit status ([2026-08-22-t0093-cluster.md](2026-08-22-t0093-cluster.md)).
 
 ## Where the rule stands
 
-Adapter R5 (the anchor, the never-pipe rule); `scripts/watch.sh` is the implementation.
+Adapter R5 (the anchor, the never-pipe rule); `shepherd-watch` is the implementation.

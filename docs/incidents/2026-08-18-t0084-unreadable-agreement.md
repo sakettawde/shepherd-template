@@ -8,8 +8,8 @@ The Brief said the project's own CLAUDE.md was the authoritative working agreeme
 
 ## What changed
 
-The registry card gained `working-agreement:` — the branch on which the project's CLAUDE.md is actually readable, or `none` — set from a live check (`scripts/working-agreement.sh`) and never from PR state. When it is not the dev branch, triage inlines the template's four standing rules into `### Context` and deletes the Constraints line that points at the file; dispatch's preflight re-runs the check at every launch, holds a Brief that arrived without the rules, and flips the field once the onboarding PR merges. For ip-landing itself Saket ruled merge-as-you-go the same day.
+The registry card gained `working-agreement:` — the branch on which the project's CLAUDE.md is actually readable, or `none` — set from a live check (`shepherd-working-agreement`) and never from PR state. When it is not the dev branch, triage inlines the template's four standing rules into `### Context` and deletes the Constraints line that points at the file; dispatch's preflight re-runs the check at every launch, holds a Brief that arrived without the rules, and flips the field once the onboarding PR merges. For ip-landing itself Saket ruled merge-as-you-go the same day.
 
 ## Where the rule stands
 
-`docs/protocols.md` § Working agreement; CLAUDE.md §6 (repo rules live in the project's CLAUDE.md, and only this field decides inlining).
+`docs/protocols.md` § Working agreement; the manual §6 (repo rules live in the project's CLAUDE.md, and only this field decides inlining).

@@ -8,7 +8,7 @@ Two failures on one task. First, a naive re-arm of the status-file watcher fired
 
 ## What changed
 
-The re-arm anchors on the **count of wake-worthy records**, never on line count, and the anchor is computed by `scripts/watch.sh` (`wake_count`) at every arming — a re-arm never fires on a claim already handled, and the general rule is that a watcher whose condition is already true when armed is worse than none. Dialogs are cancelled with `herdr pane send-keys <pane> Escape`, never answered through `pane run`, and an R6 read confirms the box is clear before any prompt is sent.
+The re-arm anchors on the **count of wake-worthy records**, never on line count, and the anchor is computed by `shepherd-watch` (`wake_count`) at every arming — a re-arm never fires on a claim already handled, and the general rule is that a watcher whose condition is already true when armed is worse than none. Dialogs are cancelled with `herdr pane send-keys <pane> Escape`, never answered through `pane run`, and an R6 read confirms the box is clear before any prompt is sent.
 
 ## Where the rule stands
 

@@ -3,7 +3,7 @@ in this directory (worker_stop.py, worker_notify.py, worker_event.py); never
 run on its own.
 
 Every hook appends one JSON object per line to $SHEPHERD_STATUS_FILE, the
-task's ground-truth status file (CLAUDE.md §2 rule 1). A hook that cannot do
+task's ground-truth status file (the manual §2 rule 1). A hook that cannot do
 its job says so in the same file (event "hook_error"), or in the sidecar
 "<status-file>.err" when the status file itself cannot be written, or on
 stderr as the last resort — never silently. Nothing here raises past main().
