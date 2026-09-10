@@ -276,7 +276,11 @@ assert_eq "…and a reader with no SHEPHERD_ID refuses it too, not owns it" "$rc
 assert_eq "…still naming the owner unknown" "$out" "ARMED-ELSEWHERE T-0004 status=unknown"
 assert_ok "…and it survives that reader as well" bash -c "kill -0 $anon 2>/dev/null"
 assert_file "…with its record left in place" "$WATCHERS/T-0004.status"
-assert_eq "…and nothing of this session armed over it" "$(bash "$W" list T-0004 | grep -c 'session=sess-me')" "0"
+# No "nothing of this session armed over it" here, though the named-peer case
+# above asserts exactly that: under `timeout` it cannot fail. A regression TERMs
+# the parent, whose cleanup removes the record it just armed, so `list` prints
+# nothing either way - the assertion would pass against the broken predicate and
+# measure nothing. The record surviving, one line up, is the real claim.
 kill "$anon" 2>/dev/null; wait "$anon" 2>/dev/null
 
 # A dead record (its process is gone) is simply missing.
