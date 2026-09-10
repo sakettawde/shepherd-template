@@ -204,21 +204,67 @@ overlap() {  # <areas-a> <areas-b> -> the first shared token, "*" when either to
   comm -12 <(printf '%s\n' "$1") <(printf '%s\n' "$2") | head -1
 }
 
-gates() {
-  local f id proj ps mine sib tok
+# collect_sibs - ACTIVE_SIBS: every active card of this family, all owners,
+# this one aside. A reply card is skipped: its lane shares no lock and it
+# writes nothing.
+collect_sibs() {
+  local f id proj
   ACTIVE_SIBS=()
   for f in $(active_cards); do
     id=$(basename "$f" .md); [ "$id" != "$TASK" ] || continue
-    [ "$(card_kind "$f")" != reply ] || continue   # a reply lane shares no lock and writes nothing
+    [ "$(card_kind "$f")" != reply ] || continue
     proj=$(card_field "$f" project) || continue
     [ "$(card_family "$proj")" = "$FAMILY" ] || continue
     ACTIVE_SIBS+=("$id")
   done
-  ps=$(safety "$CARD")
-  [ "$ps" = independent ] || hold "gate 1 this card serialized (parallel-safety: $ps)"
+}
+
+# gate1 - `serialized` means "nothing else in the family runs beside me", so it
+# is judged against what is LIVE, never against which lane happened to be free.
+# It used to sit inside the lane-selection path alone, so a card whose preferred
+# lane was FREE returned before it ever ran and its own `parallel-safety:` went
+# unread (T-0272). It runs before acquire_lane now, which binds it on both paths
+# at once and leaves no lane lock to leak when it holds.
+#
+# Two independent witnesses say the family is live, and EITHER is enough for the
+# self-refusal: an active sibling card, read here; or a HELD preferred lane, read
+# by select_lane's second gate1_self call. Neither implies the other - the ledger
+# can be wrong about a worker that is still running, and `shepherd-lock acquire`
+# takes any task string (`none` by default), so a held lane proves nothing about
+# a card.
+#
+# The self-refusal is skipped only when BOTH witnesses are silent: a free lane and
+# no active sibling. Refusing there would mean a serialized card in an idle family
+# could never dispatch again - a deadlock for every card in it. Refusing on a held
+# lane deadlocks nothing, because that lock is released when its holder finishes.
+gate1() {
+  local id
+  if [ "${#ACTIVE_SIBS[@]}" -gt 0 ]; then gate1_self; fi
   for id in "${ACTIVE_SIBS[@]}"; do
     [ "$(safety "$TASKS_DIR/$id.md")" = independent ] || hold "gate 1 $id serialized"
   done
+}
+
+# gate1_self - the self-refusal, called from gate1 when a sibling is active and
+# from select_lane when the preferred lane turns out held. The second call can
+# only be the first to FIRE when there is no active sibling at all, so gate1's
+# "this card serialized" before "T-XXXX serialized" order is never inverted; and
+# it runs on a FAILED acquire, holding no lock of its own.
+gate1_self() {
+  local ps
+  ps=$(safety "$CARD")
+  [ "$ps" = independent ] || hold "gate 1 this card serialized (parallel-safety: $ps)"
+}
+
+# gate2 - disjoint touch-areas, on the lane-selection path only, unchanged by
+# T-0272: that card moved gate 1 alone. Gate 2 still goes unread when the
+# preferred lane is free - reported as a follow-up, not fixed here.
+#
+# It iterates ACTIVE_SIBS with no emptiness guard, unlike gate1: an empty
+# expansion is safe under `set -u` on bash 4.4 and later, and the loop simply
+# does not run. gate1's guard is a rule, not a bash workaround.
+gate2() {
+  local id mine sib tok
   mine=$(areas "$CARD")
   for id in "${ACTIVE_SIBS[@]}"; do
     sib=$(areas "$TASKS_DIR/$id.md")
@@ -270,13 +316,16 @@ walk() {
 
 select_lane() {
   local rc
+  collect_sibs
+  gate1
   acquire_lane "$PROJECT"; rc=$?
   case $rc in
     0) LANE=$PROJECT; read -r LANE_ROW LANE_PATH <<<"$(lane_path "$PROJECT")"; return 0 ;;
     2) hold "lock error: $LOCK_OUT" ;;
   esac
   HELD_LINE=$LOCK_OUT
-  gates
+  gate1_self
+  gate2
   [ -n "$LANE_OK" ] || judge
   walk
 }

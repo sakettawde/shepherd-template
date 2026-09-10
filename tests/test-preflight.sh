@@ -522,4 +522,77 @@ assert_eq "undo: one commit"                          "$(( $(commits) - before )
 assert_eq "undo: commit message"                      "$(git -C "$SHEPHERD_ROOT" log -1 --format=%s)" "T-0120: briefed → queued"
 bash "$P" undo T-0123 >/dev/null
 
+# --- T-0272: gate 1 binds on the free-lane path too -----------------------------
+# A serialized card's own lane being free said nothing about the rest of the
+# family: select_lane's rc=0 branch returned before gates ran, so
+# `parallel-safety:` bound only when the preferred lane happened to be HELD.
+# Gate 1 runs before any lane lock is taken now, so it binds on both paths and
+# holds with nothing to leak. Its self-refusal answers to two witnesses, either
+# one enough: an active sibling card, or a held preferred lane. T-0113 holds
+# project-karta above, so `serial` is a fresh family whose base lane is FREE.
+#
+# Slots: T-0113 is the only claimed pane here, so the DISPATCH cases below land
+# below the fixture's worker-cap. Two more claimed panes anywhere above turn
+# them into `HOLD worker-cap 3/3` - a cap failure, not a gate failure.
+registry serial yes main
+serialcard() {  # fixture: T-0171 queued on the free base lane, no lock left over
+  card T-0171 queued shepherd-kelpie serial 2026-09-01T09:00 "parallel-safety: $1"
+  bash "$LOCK" release project-serial shepherd-kelpie >/dev/null 2>&1
+}
+card T-0170 briefed shepherd-kelpie serial~2 2026-09-01T08:00 "parallel-safety: independent - sib"
+
+serialcard "serialized - me"
+out=$(bash "$P" T-0171); rc=$?
+assert_eq "free lane, this card serialized, a live sibling -> gate 1" \
+  "$(first "$out")" "HOLD gate 1 this card serialized (parallel-safety: serialized)"
+assert_eq "the free-lane gate 1 hold exits 1"    "$rc" "1"
+assert_eq "and leaves no lane lock behind"       "$(ls "$L" | grep -c '^project-serial.lock$')" "0"
+assert_eq "and leaves the card queued"           "$(bash "$C" get T-0171 state)" "queued"
+
+# the sibling half binds on a free lane too: before the fix this dispatched
+bash "$C" set T-0170 parallel-safety "serialized - sib" --no-commit >/dev/null
+serialcard "independent - me"
+out=$(bash "$P" T-0171)
+assert_eq "free lane, a serialized live sibling -> gate 1" "$(first "$out")" "HOLD gate 1 T-0170 serialized"
+
+# a free lane AND no live sibling: both witnesses silent, so the self-refusal is
+# inert - or every serialized card in an idle family would deadlock. This is the
+# direction the obvious fix (calling gates unchanged from the free-lane path)
+# breaks.
+sed -i 's/^state: briefed/state: done/' "$T/T-0170.md"
+serialcard "serialized - me"
+out=$(bash "$P" T-0171); rc=$?
+assert_eq "free lane, serialized, NO live sibling -> DISPATCH" "$(first "$out")" "DISPATCH serial"
+assert_eq "the free-lane dispatch exits 0"       "$rc" "0"
+bash "$P" undo T-0171 >/dev/null
+
+# ...but a HELD lane is the second witness, and it stands alone: the family has
+# no active card here, and the lock names a task that has none. A close-out sits
+# in this state between the card's commit and the lock release, and a card
+# wrongly marked done under a live worker sits in it indefinitely. The self-
+# refusal stays unconditional on that path, --lane-ok and all.
+serialcard "serialized - me"
+bash "$LOCK" acquire project-serial shepherd-collie w6:p2 sess-c T-9004 >/dev/null
+out=$(bash "$P" T-0171); rc=$?
+assert_eq "held lane, NO live sibling, serialized -> gate 1 still holds" \
+  "$(first "$out")" "HOLD gate 1 this card serialized (parallel-safety: serialized)"
+out=$(bash "$P" T-0171 --lane-ok "read the Gotchas"); rc=$?
+assert_eq "--lane-ok never walks a serialized card past gate 1" \
+  "$(first "$out")" "HOLD gate 1 this card serialized (parallel-safety: serialized)"
+assert_eq "so no clone lane was opened for it"   "$(ls "$L" | grep -c '^project-serial~')" "0"
+assert_eq "and the card is still queued"         "$(bash "$C" get T-0171 state)" "queued"
+bash "$LOCK" release project-serial shepherd-collie >/dev/null
+
+# the reply skip and the all-owners scan hold on the new path too
+card T-0172 briefed shepherd-kelpie serial 2026-09-01T08:30 "kind: reply"
+serialcard "serialized - me"
+out=$(bash "$P" T-0171)
+assert_eq "an active reply card is no sibling on the free-lane path" "$(first "$out")" "DISPATCH serial"
+bash "$P" undo T-0171 >/dev/null
+sed -i 's/^state: briefed/state: done/' "$T/T-0172.md"
+card T-0173 briefed shepherd-collie serial~3 2026-09-01T08:40 "parallel-safety: serialized - peer"
+serialcard "independent - me"
+out=$(bash "$P" T-0171)
+assert_eq "a peer's serialized card is a sibling on the free-lane path" "$(first "$out")" "HOLD gate 1 T-0173 serialized"
+
 finish
