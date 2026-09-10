@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/lib/shepherd-common.sh
+# Tests for lib/shepherd-common.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/harness.sh"

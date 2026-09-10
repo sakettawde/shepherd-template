@@ -1,3 +1,4 @@
-.claude/settings.local.json
-ledger/locks/
-ledger/shepherds/
+# Build artefacts. A committed .pyc embeds the absolute path of the machine that
+# wrote it, which is exactly what the plugin must not ship (T-0267).
+__pycache__/
+*.pyc

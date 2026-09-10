@@ -191,7 +191,7 @@ out=$(bash "$P" T-0206); rc=$?
 assert_eq "a failed fetch is a JUDGE, not a NOTE" "$(first "$out" | cut -d' ' -f1-3)" "JUDGE fetch failed:"
 assert_eq "JUDGE exits 3"                       "$rc" "3"
 assert_ok "nothing was created"                 test ! -e "$R/broken-wt2"
-assert_ok "and Saket decides"                   grep -q '^next: undo the claim (dispatch step 6) and report to Saket' <<<"$out"
+assert_ok "and the operator decides"                   grep -q '^next: undo the claim (dispatch step 6) and report to the operator' <<<"$out"
 
 # --- diverged: neither ref is the tip ------------------------------------------
 newrepo forked

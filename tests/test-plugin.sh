@@ -57,9 +57,19 @@ done
 # an adopter reads them.
 TEXT_DIRS=("$ROOT/manual" "$ROOT/skills" "$ROOT/templates" "$ROOT/docs" "$ROOT/bin"
            "$ROOT/hooks" "$ROOT/lib" "$ROOT/tests" "$ROOT/README.md" "$ROOT/CHANGELOG.md")
-homes=$(grep -rn '/home/[a-z]' "${TEXT_DIRS[@]}" 2>/dev/null | grep -v '^Binary' || true)
+homes=$(grep -rlI '/home/[a-z]' "${TEXT_DIRS[@]}" 2>/dev/null || true)
 assert_eq "no hard-coded home directory anywhere in plugin text" "$(printf '%s' "$homes" | grep -c . )" "0"
 [ -n "$homes" ] && printf '       %s\n' "$homes" | head -5
+# `grep -v '^Binary'` used to hide exactly the case that bit: a tracked .pyc
+# carries the absolute path of the machine that compiled it. Nothing compiled
+# belongs in a distributed plugin, so the rule is that none is tracked at all.
+tracked_bin=$(git -C "$ROOT" ls-files | grep -E '__pycache__|\.pyc$' || true)
+assert_eq "no compiled python is tracked" "$(printf '%s' "$tracked_bin" | grep -c . )" "0"
+[ -n "$tracked_bin" ] && printf '       %s\n' "$tracked_bin" | head -5
+assert_ok ".gitignore keeps it that way" grep -qx '__pycache__/' "$ROOT/.gitignore"
+binleak=$(git -C "$ROOT" ls-files -z | xargs -0 -r grep -l '/home/[a-z]' 2>/dev/null || true)
+assert_eq "no tracked file of any kind carries a home directory" "$(printf '%s' "$binleak" | grep -c . )" "0"
+[ -n "$binleak" ] && printf '       %s\n' "$binleak" | head -5
 bare=$(grep -rnoE '(^|[^:/[:alnum:]_-])/(wake|triage|dispatch|monitor|retro|onboard|init|herdr-adapter)([^:[:alnum:]_-]|$)' \
         "${TEXT_DIRS[@]}" 2>/dev/null || true)
 assert_eq "no bare skill invocation anywhere in plugin text" "$(printf '%s' "$bare" | grep -c . )" "0"
@@ -224,6 +234,29 @@ miss = [a for a in d['permissions']['allow']
         if a.startswith('Bash(shepherd-')
         and not os.path.exists(os.path.join('$ROOT', 'bin', a[len('Bash('):].split(':')[0]))]
 sys.exit(1 if miss else 0)"
+# The reverse direction is the one that costs a permission prompt: a command a
+# shipped skill tells shepherd to run, that the seeded allow list does not cover.
+assert_ok "every instance command a skill invokes is allow-listed" \
+  python3 -c "
+import json, os, re, sys
+root = '$ROOT'
+allowed = {a[len('Bash('):].split(':')[0]
+           for a in json.load(open(os.path.join(root, 'templates/instance/.claude/settings.json')))['permissions']['allow']
+           if a.startswith('Bash(shepherd-')}
+# worker-side commands reach a worker through the plugin's bin/ and never run in
+# the instance session, so they need no instance allow rule
+worker_side = {'shepherd-status', 'shepherd-reply'}
+named = set()
+for base, _, files in os.walk(os.path.join(root, 'skills')):
+    for f in files:
+        if f.endswith('.md'):
+            named |= set(re.findall(r'\bshepherd-[a-z-]+', open(os.path.join(base, f)).read()))
+named |= set(re.findall(r'\bshepherd-[a-z-]+', open(os.path.join(root, 'manual/shepherd.md')).read()))
+real = {c for c in named if os.path.exists(os.path.join(root, 'bin', c))} - worker_side
+missing = sorted(real - allowed)
+if missing:
+    sys.stderr.write('not allow-listed: ' + ', '.join(missing) + chr(10))
+sys.exit(1 if missing else 0)"
 assert_ok "the seeded settings keep the destructive-git deny list" \
   python3 -c "
 import json, sys

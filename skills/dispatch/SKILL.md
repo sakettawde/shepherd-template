@@ -20,7 +20,7 @@ description: A card is queued and a slot may be free: preflight, launch at the c
    | `DISPATCH reply` | 0 | a `kind: reply` card: the slot is yours and **no lane lock was taken** — its lane is the throwaway worktree the `lane:` line names, outside the family FIFO and the three gates, one slot under the cap like any session (`${CLAUDE_PLUGIN_ROOT}/templates/reply-card.md`; spec `${CLAUDE_PLUGIN_ROOT}/docs/specs/2026-09-07-linear-conversation-design.md` §2). The claim is committed as above; `key: value` lines follow for step 0 |
    | `HOLD <reason>` | 1 | a precondition failed, named; nothing held, the card unchanged. Report it: it names what the operator can fix |
    | `JUDGE …` | 3 | gates 1–2 passed on a held lane; the registry excerpt follows — read it, decide, re-run with `--lane-ok` or leave the card queued |
-   | `ERROR <why>` | 2 | bad id, no card, a `kind:` that is neither `build` nor `reply`, no `worker-cap` in §0, or `SHEPHERD_ID` / `HERDR_PANE_ID` / `CLAUDE_CODE_SESSION_ID` unset |
+   | `ERROR <why>` | 2 | bad id, no card, a `kind:` that is neither `build` nor `reply`, no usable `SHEPHERD_WORKER_CAP` in `.shepherd/instance.env`, or `SHEPHERD_ID` / `HERDR_PANE_ID` / `CLAUDE_CODE_SESSION_ID` unset |
 
    **Target:** the given `T-NNNN`, reading `state: queued` and carrying your `owner:` — never dispatch a card you do not own (`${CLAUDE_PLUGIN_ROOT}/docs/protocols.md` § Owner filter). The oldest queued card of yours across the **project family** goes first (`HOLD queue T-XXXX older`; `${CLAUDE_PLUGIN_ROOT}/docs/protocols.md` § Lanes says why); an older sibling blocked on `Depends on:` holds nothing, starvation not order. **Blockers first:** every `Depends on: T-XXXX` — the card's own field, above the Brief (`${CLAUDE_PLUGIN_ROOT}/templates/task-card.md`), not a line inside it — reads `state: done` (`HOLD depends-on T-XXXX <state>`), a guarantee FIFO loses once a second lane opens. A `kind: reply` card is in no FIFO: it neither waits behind an older queued build nor holds one, and the gates' sibling scan skips it too.
 3. `onboarded: yes` on the registry card (`HOLD onboarded <value>`); a clone's parent card governs.
@@ -40,7 +40,7 @@ description: A card is queued and a slot may be free: preflight, launch at the c
 
    ```bash
    shepherd-lane T-NNNN                 # → READY <lane> | HOLD … | JUDGE … | REFUSED … | ERROR …
-   shepherd-lane T-NNNN --dry-run       # the same verdict, acting on nothing
+   shepherd-lane T-NNNN --dry-run       # reads any state and acts on nothing; the acting run needs `briefed`
    shepherd-lane T-NNNN --tip <ref>     # a review reply's lane belongs at the PR head
    ```
 

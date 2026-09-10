@@ -101,7 +101,7 @@ def transcript_message(path):
 
 
 def command_claim_this_turn():
-    """The claim scripts/bin/shepherd-status wrote since the previous stop
+    """The claim shepherd-status wrote since the previous stop
     record, or None. A `stop` record resets the search: inheritance never
     reaches into an earlier turn."""
     claim = None

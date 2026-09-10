@@ -328,7 +328,11 @@ case "$cmd" in
     sid=${2:?session id}
     # Claude Code stores a session transcript under
     # ~/.claude/projects/<clone-path-with-slashes-as-hyphens>/<session-id>.jsonl.
-    proj=${3:-$HOME/.claude/projects/$(printf '%s' "$here" | tr '/' '-')}
+    # The transcript directory is named for the INSTANCE checkout, not for this
+    # plugin. `$here` was the instance repository before the framework was
+    # packaged; it is now the plugin root, so reading it here looked for the
+    # transcripts of a directory that has no sessions (T-0267).
+    proj=${3:-$HOME/.claude/projects/$(printf '%s' "$SHEPHERD_ROOT" | tr '/' '-')}
     python3 - "$proj/$sid.jsonl" << 'PY'
 import json,sys
 last=None

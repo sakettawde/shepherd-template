@@ -3,7 +3,7 @@
 A thin orchestrator for Claude Code, packaged as a plugin.
 
 Shepherd receives a stream of thoughts from you, routes them to onboarded
-projects, dispatches worker Claude Code sessions in [herdr](https://github.com/)
+projects, dispatches worker Claude Code sessions in **herdr**
 panes to do the actual work, watches them, unblocks them, verifies their results
 against ground truth, and remembers. It never does project work in its own
 context.
@@ -41,7 +41,7 @@ unrelated sessions.
 ## Requirements
 
 - Claude Code 2.1.258 or later (measured against 2.1.267).
-- [herdr](https://github.com/) 0.8.2 — the terminal multiplexer shepherd drives.
+- **herdr** 0.8.2 — the terminal multiplexer shepherd drives.
   The pin is in the manual §7; a different version stops dispatch until the
   adapter recipes are regenerated.
 - `git` 2.31 or later (`git rev-parse --path-format=absolute`), `python3`, `bash`.

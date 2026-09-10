@@ -26,7 +26,12 @@ echo "test-preflight:"
 git -C "$SHEPHERD_ROOT" init -q -b main
 git -C "$SHEPHERD_ROOT" config user.email t@t
 git -C "$SHEPHERD_ROOT" config user.name T
-printf '# manual\n\n## 0. Operator\n\n- operator: T\n- worker-cap: 3\n' > "$SHEPHERD_ROOT/CLAUDE.md"
+# The cap is SHEPHERD_WORKER_CAP in .shepherd/instance.env, not a `- worker-cap:`
+# line in CLAUDE.md — the Operator block became that file when the framework was
+# packaged. sandbox() already seeded instance.env with a cap of 6; this pins 3.
+printf '# shepherd instance\n\n@.shepherd/instance.env\n' > "$SHEPHERD_ROOT/CLAUDE.md"
+sed -i 's/^SHEPHERD_WORKER_CAP=.*/SHEPHERD_WORKER_CAP=3/' "$SHEPHERD_ROOT/.shepherd/instance.env"
+export SHEPHERD_WORKER_CAP=3
 git -C "$SHEPHERD_ROOT" add CLAUDE.md; git -C "$SHEPHERD_ROOT" commit -qm seed
 mkdir -p "$REG" "$R"
 
@@ -259,13 +264,17 @@ out=$(env -u SHEPHERD_ID bash "$P" T-0113); rc=$?
 assert_eq "no SHEPHERD_ID -> ERROR 2"            "$rc" "2"
 out=$(env -u CLAUDE_CODE_SESSION_ID bash "$P" T-0113); rc=$?
 assert_eq "no session -> ERROR 2"                "$rc" "2"
-sed -i '/worker-cap/d' "$SHEPHERD_ROOT/CLAUDE.md"
+# A cap that is unset, or not a whole number, is an ERROR rather than "no cap":
+# dispatching past an unknown cap is the failure this gate exists to stop.
+sed -i '/^SHEPHERD_WORKER_CAP=/d' "$SHEPHERD_ROOT/.shepherd/instance.env"
+unset SHEPHERD_WORKER_CAP
 out=$(bash "$P" T-0113 --lane-ok "silent"); rc=$?
-assert_eq "no worker-cap line -> ERROR 2"        "$rc" "2"
+assert_eq "no SHEPHERD_WORKER_CAP -> ERROR 2"        "$rc" "2"
 assert_eq "and the lane was released"            "$(ls "$L" | grep -c 'project-karta~3')" "0"
 
 # --- undo: the ladder in order ----------------------------------------------------
-printf -- '- worker-cap: 3\n' >> "$SHEPHERD_ROOT/CLAUDE.md"
+printf 'SHEPHERD_WORKER_CAP=3\n' >> "$SHEPHERD_ROOT/.shepherd/instance.env"
+export SHEPHERD_WORKER_CAP=3
 # T-0111 was relocated karta -> karta~2 and claimed; undo restores every field
 before=$(commits)
 out=$(bash "$P" undo T-0111); rc=$?

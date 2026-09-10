@@ -26,7 +26,7 @@
 # context_window.context_window_size (200000, or 1000000 for extended-context models) and
 # context_window.used_percentage, which "may be null early in the session". Claude Code
 # re-runs the status line when its `command` changes, so a registration takes effect at once.
-# Called by init-shepherd's install step; run again after pulling a change to statusline.py.
+# Called by the init skill's install step; run again after pulling a change to statusline.py.
 set -euo pipefail
 
 here=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)

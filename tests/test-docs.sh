@@ -387,7 +387,7 @@ done
 
 # The prose it replaced is gone from every surface that INVOKES it. The spec
 # may still quote it as history — that is the record of what was interrupted.
-for f in shepherd-rollover \
+for f in bin/shepherd-rollover \
          tests/test-rollover.sh \
          manual/shepherd.md \
          skills/herdr-adapter/references/v0.8.2.md; do
@@ -1742,7 +1742,7 @@ assert_ok "and --effort is read from the ladder, not spelled here" grep -q -- '-
 for f in manual/shepherd.md \
          skills/dispatch/SKILL.md \
          skills/herdr-adapter/references/v0.8.2.md \
-         shepherd-smoke; do
+         bin/shepherd-smoke; do
   assert_fail "no literal opus pin survives in $f" grep -q 'CLAUDE_CODE_SUBAGENT_MODEL=opus' "$ROOT/$f"
 done
 assert_ok "shepherd-smoke's rehearsal of R3 follows its own model" \

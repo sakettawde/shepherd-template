@@ -312,7 +312,7 @@ cmd_sweep() {
           [ -n "$tssec" ] || tssec=$nowsec
           age=$(( nowsec - tssec ))
           if [ "$age" -gt "$LONG_HOLD_SECONDS" ]; then
-            say LONG-HELD "$base" "$holder ${age}s - report to Saket, never steal"
+            say LONG-HELD "$base" "$holder ${age}s - report to the operator, never steal"
           fi
           ;;
       esac

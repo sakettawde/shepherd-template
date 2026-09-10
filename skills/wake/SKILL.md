@@ -34,6 +34,7 @@ Five checks, in that order.
 | `stale` | the hook could not write. Run `shepherd-manual sync`, then commit as above; if it refuses, report it |
 | `lane-stale` | you are in a worktree lane, which is read-only for this file. Report it and do nothing |
 | `missing` | run `/shepherd:init` — this is not a seeded instance |
+| `not-instance` or `no-manual` | you are not in a seeded instance, or the installed plugin ships no manual. Report it and stop dispatching: the install is wrong |
 
 **Monitor** — the status line names a running monitor count. **Expect none today, and arm the primary by hand:** `shepherd-watch arm T-NNNN` in the background per active card you own, which step 7 does anyway. The plugin's `status-claims` monitor declares `when: "on-skill-invoke:wake"`, and that trigger does not start it — measured 2026-09-10 on Claude Code 2.1.267; the CHANGELOG's known limitations hold the detail and why the declaration stays. Say in step 10 which of the two you are on.
 

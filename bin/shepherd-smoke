@@ -250,7 +250,31 @@ pane_tail()  { herdr pane read "$PID" --source visible --lines 30 --format text 
 last_field() { python3 -c 'import json,sys
 lines=[l for l in open(sys.argv[1],encoding="utf-8") if l.strip()]
 print((json.loads(lines[-1]).get(sys.argv[2]) or "") if lines else "")' "$STATUS" "$1" 2>/dev/null; }
+# The worker hooks now SHIP in the plugin's hooks/hooks.json and fire wherever the
+# plugin is enabled, so requiring a hand-registered copy in ~/.claude/settings.json
+# would fail the gate on a correctly-installed plugin — and init's own text says
+# there is nothing to merge there (T-0267). Either source counts: the plugin's
+# manifest, or a settings copy from before the migration.
 hooks_registered() {
+  plugin_hook_registered && return 0
+  settings_hook_registered
+}
+# The plugin's own manifest, beside this script.
+plugin_hook_registered() {
+  python3 - "$here/hooks/hooks.json" <<'PY' 2>/dev/null
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+for e in (s.get("hooks") or {}).get("Stop") or []:
+    for h in e.get("hooks") or []:
+        if h.get("command", "").rstrip("'\"").endswith("worker-stop.sh"):
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+settings_hook_registered() {
   python3 - "$HOME/.claude/settings.json" <<'PY' 2>/dev/null
 import json, sys
 try:
@@ -403,8 +427,9 @@ step_gate() {                                                                   
     || { fail gate "herdr status does not say compatible: yes — $(printf '%s' "$st" | tr '\n' ' ' | cut -c1-160)"; return 1; }
   [ -x "$HOOK" ] || { fail gate "$HOOK is missing or not executable"; return 1; }
   if [ "$DRY" -eq 0 ]; then
-    hooks_registered || { fail gate "no Stop hook ending in worker-stop.sh in $HOME/.claude/settings.json — run init-shepherd step 4"; return 1; }
-    pass gate "herdr $pin, compatible; Stop hook registered; claude on PATH"
+    hooks_registered || { fail gate "no Stop hook ending in worker-stop.sh in either $here/hooks/hooks.json or $HOME/.claude/settings.json"; return 1; }
+    src=settings; plugin_hook_registered && src=plugin
+    pass gate "herdr $pin, compatible; Stop hook registered ($src); claude on PATH"
   else
     pass gate "herdr $pin (stub), compatible; hook $HOOK (dry-run)"
   fi
@@ -413,7 +438,7 @@ step_gate() {                                                                   
 step_pane() {                                                                   # R2
   local out
   # A tab, not a split of the shepherd's own pane: five splits leave worker panes ~35
-  # columns wide and truncate the ctx status line (T-0256; Saket's ruling, 2026-09-08).
+  # columns wide and truncate the ctx status line (T-0256; the operator's ruling, 2026-09-08).
   # One call returns the tab and its root pane; --workspace is omitted when the variable
   # is unset, and herdr falls back to the focused workspace.
   out=$(herdr tab create ${HERDR_WORKSPACE_ID:+--workspace "$HERDR_WORKSPACE_ID"} --cwd "$WORK" --label w-smoke --no-focus 2>&1)

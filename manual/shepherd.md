@@ -12,7 +12,7 @@ The operator facts are `.shepherd/instance.env` — committed, machine-readable,
 |---|---|
 | `SHEPHERD_INSTANCE` | the marker every instance command and the `SessionStart` hook gate on |
 | `SHEPHERD_OPERATOR` | who you work for |
-| `SHEPHERD_CODE_DIR` | where their projects live; `shepherd-init registry` scans it, and the paths land in `registry/projects.md` |
+| `SHEPHERD_CODE_DIR` | where their projects live; you pass it to `shepherd-init registry <code-dir>`, which lands the paths in `registry/projects.md` |
 | `SHEPHERD_NOTIFICATIONS` | `sounds` or `silent` |
 | `SHEPHERD_WORKER_CAP` | concurrent workers, the total across **all** instances on this machine, not per instance |
 | `SHEPHERD_TIER_S`, `SHEPHERD_TIER_STANDARD`, `SHEPHERD_TIER_HEAVY` | the worker ladder, each `<model>/<effort>` |
@@ -90,7 +90,7 @@ grep -lE "^project: <slug>(~[0-9]+)?$" ledger/tasks/T-*.md       # the project a
 grep -l "^onboarded: yes" registry/projects/*.md                 # workable projects
 grep -H "^working-agreement:" registry/projects/*.md             # where each project's CLAUDE.md is readable
 shepherd-lane T-NNNN [--dry-run] [--tip <ref>]            # dispatch step 0: the card's lane detached at its dev-branch tip; READY | HOLD | JUDGE | REFUSED | ERROR
-shepherd-preflight T-NNNN [--lane-ok "<what you read>"]  # dispatch preconditions 2-6 as one verdict: DISPATCH | HOLD | JUDGE; `undo T-NNNN` is the ladder
+shepherd-preflight T-NNNN [--lane-ok "<what you read>"]  # preconditions 2-6 as one verdict: DISPATCH | HOLD | JUDGE | ERROR; `undo T-NNNN` is the ladder (UNDONE)
 shepherd-card get|set|log|transition T-NNNN ...                   # card edits under the owner rule, one card per commit
 shepherd-working-agreement <path> <dev-branch>                    # prints the branch where CLAUDE.md is readable, or nothing
 shepherd-wake-report                                              # wake steps 5-9 as one read; STATUS line last

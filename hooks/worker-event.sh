@@ -1,6 +1,6 @@
 #!/bin/sh
 # shepherd worker event hook — one script registered under four Claude Code
-# events (init-shepherd step 4): PermissionRequest, PermissionDenied,
+# events (the init skill step 4): PermissionRequest, PermissionDenied,
 # StopFailure, SessionEnd. Each becomes one status-file record with `event`
 # naming the hook and `kind` its sub-type (tool name, tool name, error type,
 # end reason), written by lib/worker_event.py. Records only: it returns no

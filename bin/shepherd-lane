@@ -13,7 +13,7 @@
 #                                worktree of the parent; a failed add, checkout, seed or
 #                                install - undo the claim (dispatch step 6) and report
 #       JUDGE <reason>   exit 3  `fetch failed` or `diverged`: no tip is right and no script
-#                                may choose one. Nothing was acted on; Saket decides
+#                                may choose one. Nothing was acted on; the operator decides
 #       REFUSED <why>    exit 1  the card is not briefed, or not yours - nothing was read past
 #                                the header, nothing was done
 #       ERROR <why>      exit 2  bad id, no card, no registry card, no path:/dev-branch:, a
@@ -69,7 +69,7 @@ err() { echo "ERROR $*"; print_notes; exit 2; }
 # after a rollback has to say the worktree went away again, or a shepherd
 # reading the verdict cannot tell the path is free.
 hold()  { echo "HOLD $*"; emit_state; emit_details; print_extra; echo "next: undo the claim (dispatch step 6) and report this line"; print_notes; exit 1; }
-judge() { echo "JUDGE $*"; emit_state; emit_details; print_extra; echo "next: undo the claim (dispatch step 6) and report to Saket - no script chooses a tip here"; print_notes; exit 3; }
+judge() { echo "JUDGE $*"; emit_state; emit_details; print_extra; echo "next: undo the claim (dispatch step 6) and report to the operator - no script chooses a tip here"; print_notes; exit 3; }
 
 emit_state() {
   [ -n "$LANE" ] && echo "lane: $LANE"
@@ -174,7 +174,7 @@ resolve_lane() {
 # because a shell running `fetch || echo` cannot tell the two apart. A script
 # can ask, so it does: no origin remote is the T-0129 case the incident already
 # blesses - answer from the local ref and say so - while a configured origin
-# whose fetch failed leaves a tip that may be stale, and that is Saket's call.
+# whose fetch failed leaves a tip that may be stale, and that is the operator's call.
 resolve_tip() {
   local parent=$1 has_origin=0 lsha= rsha=
   git -C "$parent" remote get-url origin >/dev/null 2>&1 && has_origin=1
@@ -307,7 +307,7 @@ create_lane() {
 
 # reuse_lane - a worktree already there. It is detached and nothing pulls it
 # forward, so it is reset to the tip - but only when `git status --porcelain`
-# is empty, because what happens to uncommitted work is Saket's call
+# is empty, because what happens to uncommitted work is the operator's call
 # (docs/incidents/2026-09-02-stale-clone-tip.md).
 reuse_lane() {
   local dirty head out common

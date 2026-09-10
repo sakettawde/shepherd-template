@@ -14,7 +14,7 @@
 #                                 (a worker-cap hold adds one Log line)
 #       JUDGE ...         exit 3  gates 1-2 passed on a held lane; the registry excerpt follows -
 #                                 read it, then re-run with --lane-ok "<what you read>"
-#       ERROR <why>       exit 2  bad id, no card, no worker-cap in CLAUDE.md, or an unset
+#       ERROR <why>       exit 2  bad id, no card, no usable SHEPHERD_WORKER_CAP in .shepherd/instance.env, or an unset
 #                                 SHEPHERD_ID / HERDR_PANE_ID / CLAUDE_CODE_SESSION_ID
 #   shepherd-preflight undo T-NNNN
 #       UNDONE ...        exit 0  the ladder, in order: queued / pane none / original project:,
@@ -287,7 +287,16 @@ active_pane_count() {
     card_field "$f" pane
   done | grep -v '^none$' | grep -v '^$' | sort -u | grep -c .
 }
-worker_cap() { sed -n 's/^- worker-cap: *\([0-9]\{1,\}\).*/\1/p' "$SHEPHERD_ROOT/CLAUDE.md" 2>/dev/null | head -1; }
+# The cap is SHEPHERD_WORKER_CAP in .shepherd/instance.env, which
+# lib/shepherd-common.sh sources at the top of this script. It used to be the
+# `- worker-cap:` line of CLAUDE.md's `## 0. Operator` block; that block became
+# instance.env when the framework was packaged, and this was its one reader.
+worker_cap() {
+  case ${SHEPHERD_WORKER_CAP:-} in
+    ''|*[!0-9]*) return 0 ;;    # unset or not a whole number: no cap, the caller errors
+    *) printf '%s\n' "$SHEPHERD_WORKER_CAP" ;;
+  esac
+}
 
 claim_slot() {
   local i rc out cap count h lane_note
@@ -303,7 +312,7 @@ claim_slot() {
   cap=$(worker_cap)
   if [ -z "$cap" ]; then
     bash "$LOCK" release dispatch "$ME" >/dev/null 2>&1; release_lane
-    err "worker-cap not found in $SHEPHERD_ROOT/CLAUDE.md (Operator block)"
+    err "SHEPHERD_WORKER_CAP is unset or not a whole number in $SHEPHERD_ROOT/.shepherd/instance.env"
   fi
   count=$(active_pane_count)
   if [ "$count" -ge "$cap" ]; then

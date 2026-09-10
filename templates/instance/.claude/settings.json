@@ -25,7 +25,10 @@
       "Bash(shepherd-inbox:*)",
       "Bash(shepherd-output-style:*)",
       "Bash(shepherd-drill:*)",
-      "Bash(shepherd-smoke:*)"
+      "Bash(shepherd-smoke:*)",
+      "Bash(shepherd-init:*)",
+      "Bash(shepherd-paths:*)",
+      "Bash(shepherd-statusline:*)"
     ],
     "deny": [
       "Bash(git push --force*)",
@@ -39,5 +42,5 @@
       "Bash(git checkout .*)"
     ]
   },
-  "//shepherd-commands": "The instance commands ship in the shepherd plugin's bin/ and reach the Bash tool as bare names while the plugin is enabled. They are allow-listed one by one rather than as Bash(shepherd-*) so a future command is a deliberate addition here. The monitor command follows Bash permission rules like any other, which is why Bash(shepherd-watch:*) is on this list (https://code.claude.com/docs/en/tools-reference#monitor-tool, read 2026-09-10)."
+  "//shepherd-commands": "The instance commands ship in the shepherd plugin's bin/ and reach the Bash tool as bare names while the plugin is enabled. They are allow-listed one by one rather than as Bash(shepherd-*) so a future command is a deliberate addition here; tests/test-plugin.sh checks BOTH directions \u2014 that every rule names a command the plugin ships, and that every command a shipped skill tells shepherd to run has a rule. shepherd-status and shepherd-reply are omitted on purpose: they run in a worker session, not here. The monitor command follows Bash permission rules like any other, which is why Bash(shepherd-watch:*) is on this list (https://code.claude.com/docs/en/tools-reference#monitor-tool, read 2026-09-10). Until you accept the workspace trust dialog once, Claude Code ignores this whole allow list (measured 2026-09-10 on Claude Code 2.1.267)."
 }

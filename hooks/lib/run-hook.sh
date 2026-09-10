@@ -55,9 +55,9 @@ shepherd_hook_mismatch() {
 # printable ASCII and space and turns everything else - control bytes and
 # non-ASCII alike - into a space, so the result is always valid UTF-8 too: a
 # cut through a multi-byte character would raise UnicodeDecodeError in
-# watch.sh's reader, which parses no line of the file after it.
+# shepherd-watch's reader, which parses no line of the file after it.
 #
-# It matters because BOTH readers (watch.sh's status_py, worker_stop.py) skip
+# It matters because BOTH readers (shepherd-watch's status_py, worker_stop.py) skip
 # a line they cannot parse. An unparseable hook_error is the record announcing
 # that a hook failed being thrown away for the same reason.
 shepherd_hook_error() {
