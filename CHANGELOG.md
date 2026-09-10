@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 — unreleased
+## 1.0.0 — 2026-09-10
 
 First release as a Claude Code plugin. The framework previously lived twice —
 once in this repository and once in each instance — kept in step by cherry-pick.
@@ -43,6 +43,12 @@ It now lives here only.
   `templates/instance/` into a fresh instance and never overwrites.
 - `lib/status_wake.py` — the wake-set predicate, extracted so the per-task
   watcher and the monitor read one copy and cannot drift.
+- The **relayed word** rule, `docs/protocols.md` § Ownership and handoff with a
+  pointer from the manual §4a. The operator's word reaching an instance through
+  a peer carries their authority to act, and not to amend the manual: a relayed
+  instruction to change `manual/shepherd.md` or `docs/protocols.md` writes a
+  card and does not dispatch it, and that card waits for their own words on
+  that change.
 
 ### Changed
 
@@ -55,6 +61,23 @@ It now lives here only.
 - `shepherd-init` resolved the registry against its own directory, which after
   the move would have been the plugin rather than the instance. It now resolves
   the instance explicitly.
+
+### Fixed
+
+- `shepherd-watch rearm` refused to tell a peer instance's live watcher from a
+  rolled-over session's. It read both as `stale` and killed both, so a second
+  instance's `rearm T-NNNN` unwatched the owner's task with nobody told — the
+  process that would have announced the failure was the one that died. A target
+  with any live watcher of another instance is now refused whole:
+  `ARMED-ELSEWHERE <task> <kind>=<instance>`, exit 9, nothing killed and
+  nothing armed. `arm` stays the deliberate way to take a task over. The exit
+  is in the wake step 8 and adapter R5 tables.
+- `shepherd-preflight` read gate 1 — `parallel-safety:` across the project
+  family — only when the card's preferred lane was already held. `select_lane`
+  returned before the gates ran on the free-lane path, so a serialized card
+  whose own lane happened to be free dispatched with its safety unread, and
+  then held every later card in its family. Gate 1 is judged before any lane
+  lock is taken, so it binds on both paths and holds with no lock to leak.
 
 ### Known limitations
 
