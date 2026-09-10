@@ -255,13 +255,28 @@ assert_ok "…leaving that watcher alive" bash -c "kill -0 $peer 2>/dev/null"
 kill "$peer" 2>/dev/null; wait "$peer" 2>/dev/null
 
 # A live record whose owner= is empty is not evidence either way, so it takes
-# the same recoverable direction: named and refused, never TERMed.
+# the same recoverable direction: named and refused, never TERMed. Both
+# directions of the empty cell are asserted, because they fail differently: a
+# NAMED reader gets "" != "shepherd-test" for free from the inequality, while
+# an UNSET one compares "" against "" and reads the record as its own. The
+# second is the cell T-0275 fixed, and it is the likelier of the two - shells
+# on this machine start without SHEPHERD_ID, so the record with no owner and
+# the reader with no identity are the same condition seen twice.
 bash "$SHEPHERD_ROOT/fake/shepherd-watch" & anon=$!
 printf 'task=T-0004\nkind=status\npid=%s\nppid=%s\narmed_at=t\nwindow=30\nanchor=0\nsession=sess-old\nowner=\npane=none\nfile=x\n' "$anon" "$anon" >"$WATCHERS/T-0004.status"
 out=$(bash "$W" rearm T-0004 --window 30 2>/dev/null); rc=$?
 assert_eq "a live record with no owner is refused, not killed" "$rc" "9"
 assert_eq "…and reports the owner as unknown" "$out" "ARMED-ELSEWHERE T-0004 status=unknown"
 assert_ok "…and it is still alive" bash -c "kill -0 $anon 2>/dev/null"
+# …and empty on BOTH sides: unknown-vs-unknown is still two unknowns, never a
+# match. `timeout` bounds the regression - unfixed, this call kills the record
+# and arms its own watcher in the foreground, so it hangs rather than failing.
+out=$(timeout 10 env -u SHEPHERD_ID bash "$W" rearm T-0004 --window 30 2>/dev/null); rc=$?
+assert_eq "…and a reader with no SHEPHERD_ID refuses it too, not owns it" "$rc" "9"
+assert_eq "…still naming the owner unknown" "$out" "ARMED-ELSEWHERE T-0004 status=unknown"
+assert_ok "…and it survives that reader as well" bash -c "kill -0 $anon 2>/dev/null"
+assert_file "…with its record left in place" "$WATCHERS/T-0004.status"
+assert_eq "…and nothing of this session armed over it" "$(bash "$W" list T-0004 | grep -c 'session=sess-me')" "0"
 kill "$anon" 2>/dev/null; wait "$anon" 2>/dev/null
 
 # A dead record (its process is gone) is simply missing.

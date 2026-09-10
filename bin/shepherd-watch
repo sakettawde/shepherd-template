@@ -216,7 +216,14 @@ record_state() {  # <record-file> → live | stale | dead
 # direction: a refusal that names the record beats a TERM nobody is told about,
 # and `arm` still replaces anything.
 peer_record() {  # <record-file>
-  [ "$(record_state "$1")" = stale ] && [ "$(record_get "$1" owner)" != "$OWNER" ]
+  local theirs
+  [ "$(record_state "$1")" = stale ] || return 1
+  theirs=$(record_get "$1" owner)
+  # Empty on either side is `different`, and is spelled out rather than left to
+  # `!=`: with both sides empty a plain inequality reads them as EQUAL, which
+  # turns "unknown owner" into "mine" and hands the record to kill_record - the
+  # one outcome the rule above exists to prevent (T-0275).
+  [ -z "$theirs" ] || [ -z "$OWNER" ] || [ "$theirs" != "$OWNER" ]
 }
 # kill_record — stop the watcher a record describes, then remove the record.
 # BOTH pids are checked against is_watch_process first, and the check is not
