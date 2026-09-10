@@ -298,6 +298,19 @@ lctx=$(printf '%s' "$lout" | python3 -c 'import json,sys;print(json.load(sys.std
 assert_ok "a lane-stale lane is told the file is generated and not edited here" \
   grep -qi 'generated and is not edited here' <<<"$lctx"
 assert_ok "…and where the current copy lives" grep -qF "$inst" <<<"$lctx"
+# The hook JSON-encodes through python3. If that is unavailable it must emit
+# NOTHING and exit 0: a half-built document is worse than silence, and a
+# SessionStart hook must never make a session start badly.
+nopy=$(mktemp -d); mkdir -p "$nopy/bin"
+for c in git sed head cmp mktemp mv cp chmod dirname basename cat bash env; do
+  cp_path=$(command -v "$c" 2>/dev/null) && ln -sf "$cp_path" "$nopy/bin/$c"
+done
+noout=$(CLAUDE_PROJECT_DIR="$inst" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$nopy/bin" \
+        bash "$HOOK" 2>/dev/null); norc=$?
+assert_eq "with python3 absent the hook emits nothing" "$noout" ""
+assert_eq "…and still exits 0" "$norc" "0"
+rm -rf "$nopy"
+
 # Off main the hook must not write either: a generated diff would ride the branch.
 git -C "$inst" checkout -q -b side 2>/dev/null
 rm -f "$inst/.claude/shepherd-manual.md"

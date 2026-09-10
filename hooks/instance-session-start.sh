@@ -68,6 +68,13 @@ elif [ "$state" = refreshed ]; then
 .claude/shepherd-manual.md was rewritten this session and is uncommitted."
 fi
 
-printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
-  "$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+# Emit valid JSON or nothing at all. The encoding goes through python3 because
+# the line carries filesystem paths; if that fails for any reason, a half-built
+# document would be worse than silence — a SessionStart hook must never make a
+# session start badly.
+encoded=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null) || encoded=
+case $encoded in
+  '"'*'"') printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' "$encoded" ;;
+  *) : ;;   # nothing usable to say; say nothing
+esac
 exit 0
