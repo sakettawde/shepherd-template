@@ -210,6 +210,24 @@ assert_ok "it says the copy is generated and not to be edited" \
   grep -qi 'generated' "$inst/CLAUDE.md"
 assert_ok "the seeded .gitignore keeps local.env out of git" \
   grep -qx '.shepherd/local.env' "$inst/.gitignore"
+# A plugin settings.json supports only `agent` and `subagentStatusLine`
+# (https://code.claude.com/docs/en/plugins#ship-default-settings-with-your-plugin,
+# read 2026-09-10), so the permission rules are instance-owned and seeded from the
+# template. An allow rule naming a command the plugin does not ship is a rule that
+# never matches — and after a rename, a rule that silently stops covering anything.
+assert_ok "every allow-listed shepherd command exists in bin/" \
+  python3 -c "
+import json, os, sys
+d = json.load(open('$ROOT/templates/instance/.claude/settings.json'))
+miss = [a for a in d['permissions']['allow']
+        if a.startswith('Bash(shepherd-')
+        and not os.path.exists(os.path.join('$ROOT', 'bin', a[len('Bash('):].split(':')[0]))]
+sys.exit(1 if miss else 0)"
+assert_ok "the seeded settings keep the destructive-git deny list" \
+  python3 -c "
+import json, sys
+d = json.load(open('$ROOT/templates/instance/.claude/settings.json'))
+sys.exit(0 if len(d['permissions']['deny']) >= 8 else 1)"
 
 assert_eq "check on a fresh instance says missing" "$(bash "$MANUAL" check --dir "$inst")" "missing"
 assert_eq "sync writes it and reports refreshed" "$(bash "$MANUAL" sync --dir "$inst")" "refreshed"
