@@ -42,7 +42,8 @@ sys.exit(0 if a==b else 1)"
 assert_ok "CHANGELOG names the manifest version" \
   grep -qF "$(python3 -c "import json;print(json.load(open('$PJ'))['version'])")" "$ROOT/CHANGELOG.md"
 # Only plugin.json belongs inside .claude-plugin/; every component sits at the
-# plugin root (https://code.claude.com/docs/en/plugins-reference#plugin-directory-structure).
+# plugin root (https://code.claude.com/docs/en/plugins-reference#plugin-directory-structure,
+# read 2026-09-10).
 for d in skills hooks bin lib monitors manual templates docs tests; do
   assert_ok "$d/ is at the plugin root" test -d "$ROOT/$d"
   assert_ok "…and not inside .claude-plugin/" test ! -e "$ROOT/.claude-plugin/$d"
