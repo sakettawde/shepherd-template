@@ -2766,10 +2766,15 @@ assert_ok "…carried to the owner by the instance that heard them" \
 assert_ok "…leaving the owner rule untouched" \
   grep -qF 'The owner rule is untouched' <<<"$own"
 assert_ok "…and a relay never supplies that authority by extension" \
-  grep -qF 'supply* that authority by extension' <<<"$own"
+  grep -qF 'that authority by extension' <<<"$own"
 # The carve-out names the plugin's manual files, the ones a relay may not amend.
-# On the instance this rule named CLAUDE.md; the plugin ships the manual as two
-# files, so both are named or the rule loses half its subject.
+# On the instance this rule named CLAUDE.md, which WAS the whole manual; the
+# plugin ships it as two files, so both are named or the rule loses half its
+# subject. What the ported rule does NOT reach is an instance's thin CLAUDE.md
+# `## Local overrides`: that is instance state the plugin does not ship (manual
+# §0) and it binds one instance rather than every installer, so the blast-radius
+# reason the carve-out gives does not carry there. Deliberately not widened by
+# T-0274, which reconciles; reported as a follow-up instead.
 assert_ok "the carve-out names manual/shepherd.md" \
   grep -qF 'manual/shepherd.md' <<<"$own"
 assert_ok "…and this file alongside it" \
@@ -2784,7 +2789,7 @@ assert_ok "…and the carve-out in the same breath" \
 assert_ok "…naming what a relayed amendment does instead" \
   grep -qF 'writes a card and does not dispatch it' <<<"$sec4a"
 assert_ok "…and sending the reader to the section for the rest" \
-  grep -qF 'docs/protocols.md` § Ownership and handoff' <<<"$sec4a"
+  grep -qF 'what counts as their own words, are `${CLAUDE_PLUGIN_ROOT}/docs/protocols.md` § Ownership and handoff' <<<"$sec4a"
 
 
 # --- the working-agreement check has one home, and the pointers name it (T-0255 c)
@@ -2972,6 +2977,20 @@ assert_ok "R5 cites the schema snapshot for the absent cap" \
   grep -q 'AgentWaitParams.timeout_ms' <<<"$r5"
 assert_ok "R5 no longer reads herdr's timeout as the window elapsing" \
   grep -qi "herdr's wait ended, which is not this window elapsing" <<<"$r5"
+# T-0268's exit 9. R5's table and wake step 8 are the only two places a caller
+# learns that a `rearm` can refuse rather than replace, and the CHANGELOG
+# advertises both; nothing held either until this card (T-0274).
+assert_ok "R5's exit table carries exit 9" grep -qE '^\| 9 \| .ARMED-ELSEWHERE' <<<"$r5"
+assert_ok "…saying nothing was killed and nothing armed" \
+  grep -qF 'nothing killed, nothing armed' <<<"$r5"
+assert_ok "…and naming arm as the way to take the task over" \
+  grep -qF '`arm` takes it over' <<<"$r5"
+step8=$(sed -n '/^### 8\./,/^### 9\./p' "$ROOT/skills/wake/SKILL.md")
+assert_ok "wake step 8 is where it was" test -n "$step8"
+assert_ok "wake step 8 says a rearm can exit 9 ARMED-ELSEWHERE" \
+  grep -qF 'exit 9 `ARMED-ELSEWHERE`' <<<"$step8"
+assert_ok "…and that it kills nothing and arms nothing" \
+  grep -qF 'it kills nothing and arms nothing' <<<"$step8"
 WATCH="$ROOT/bin/shepherd-watch"
 assert_ok "shepherd-watch measures its windows on a monotonic clock" grep -q 'set_now()' "$WATCH"
 # R5 calls this block "the script's exact line"; nothing held it to the script,

@@ -532,7 +532,7 @@ bash "$P" undo T-0123 >/dev/null
 # project-karta above, so `serial` is a fresh family whose base lane is FREE.
 #
 # Slots: T-0113 is the only claimed pane here, so the DISPATCH cases below land
-# below the fixture's worker-cap. Two more claimed panes anywhere above turn
+# at 2/3 of the fixture's worker-cap. Two more claimed panes anywhere above turn
 # them into `HOLD worker-cap 3/3` - a cap failure, not a gate failure.
 registry serial yes main
 serialcard() {  # fixture: T-0171 queued on the free base lane, no lock left over
