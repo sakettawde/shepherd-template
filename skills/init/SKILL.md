@@ -20,7 +20,8 @@ The worker hooks are **not** registered here. They ship in this plugin's `hooks/
 6. **Seed the registry** — `shepherd-init registry <code-dir>`; report the rows.
 7. **Sync the manual** — `shepherd-manual sync`; it should print `refreshed` on a fresh instance. This is the generated `.claude/shepherd-manual.md` the thin `CLAUDE.md` imports.
 8. **Commit** — `shepherd-commit "init: shepherd instance configured" CLAUDE.md .shepherd/instance.env .claude/settings.json .claude/shepherd-manual.md .gitignore registry/projects.md`; name the paths, never `git add -A` (the manual §2 rule 10). A re-run that changed nothing commits nothing — say so.
-9. **Confirm** in one line: operator, code dir, cap, ladder, registry rows, and the manual §1 launch line with their `SHEPHERD_ID` in all three places. Then tell them to restart the session, because `CLAUDE.md` and its imports are read at launch and this run wrote both.
+9. **Trust the workspace once.** A repository whose trust dialog has never been accepted has its `.claude/settings.json` allow list **ignored entirely** — measured 2026-09-10 on Claude Code 2.1.267: `Ignoring 22 permissions.allow entries from .claude/settings.json: this workspace has not been trusted`. The plugin's hooks and `bin/` are unaffected, so this shows up as permission prompts for commands the seeded allow list already covers. Tell the operator to accept the dialog once in this directory. Plugin hooks are **not** gated this way: they fire in a directory that has never been trusted (measured the same day).
+10. **Confirm** in one line: operator, code dir, cap, ladder, registry rows, and the manual §1 launch line with their `SHEPHERD_ID` in all three places. Then tell them to restart the session, because `CLAUDE.md` and its imports are read at launch and this run wrote both.
 
 ## Hard lines
 

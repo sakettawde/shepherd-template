@@ -92,5 +92,7 @@ mkdir -p "$(dirname "$dst")" || { echo "shepherd-manual: cannot create $(dirname
 tmp=$(mktemp "$(dirname "$dst")/.shepherd-manual.XXXXXX") || exit 1
 if ! cp "$SRC" "$tmp"; then rm -f "$tmp"; echo "shepherd-manual: copy failed" >&2; exit 1; fi
 mv -f "$tmp" "$dst" || { rm -f "$tmp"; echo "shepherd-manual: install failed" >&2; exit 1; }
+# mktemp creates 0600; this file is committed and read like any other.
+chmod 644 "$dst" 2>/dev/null || true
 state
 exit 0

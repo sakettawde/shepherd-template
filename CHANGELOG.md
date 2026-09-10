@@ -55,3 +55,18 @@ It now lives here only.
 - `shepherd-init` resolved the registry against its own directory, which after
   the move would have been the plugin rather than the instance. It now resolves
   the instance explicitly.
+
+### Known limitations
+
+- **The `status-claims` monitor does not start yet.** Measured 2026-09-10 on
+  Claude Code 2.1.267 with `--plugin-dir`: a monitor declared `when: "always"`
+  starts, inherits the session's environment and working directory, and its
+  output reaches the session as a `Monitor event` notification; a monitor
+  declared `when: "on-skill-invoke:<skill>"` does not start, even when that skill
+  is dispatched in the same session. `monitors/monitors.json` keeps the
+  `on-skill-invoke:wake` trigger anyway: `always` would start a status-file
+  poller in every worker and every unrelated session on the machine, which is
+  worse than no monitor. Wake step 1 therefore expects the monitor to be absent
+  and arms the primary watcher by hand, and starts passing on its own when the
+  harness honours the trigger. Not retested against an installed plugin, only
+  `--plugin-dir`.

@@ -102,6 +102,14 @@ assert_eq "it starts on the wake skill, never always" \
   "$(python3 -c "import json;print(json.load(open('$MON'))[0]['when'])")" "on-skill-invoke:wake"
 assert_ok "its command is the plugin's own shepherd-watch monitor" \
   grep -q 'bin/shepherd-watch monitor' "$MON"
+# The trigger does not start the monitor on 2.1.267 (measured 2026-09-10), so
+# wake must not assume the monitor is there: it says to arm the primary by hand.
+assert_ok "wake step 1 expects the monitor to be absent and arms by hand" \
+  grep -q 'arm the primary by hand' "$ROOT/skills/wake/SKILL.md"
+assert_ok "…and dates the measurement behind that" \
+  grep -q '2026-09-10 on Claude Code 2.1.267' "$ROOT/skills/wake/SKILL.md"
+assert_ok "the CHANGELOG records it as a known limitation" \
+  grep -qi 'monitor does not start yet' "$ROOT/CHANGELOG.md"
 assert_ok "the wake handler filters by owner before anything else" \
   grep -qi 'Ownership gate first' "$ROOT/skills/monitor/SKILL.md"
 assert_ok "and the monitor line is named as a wake source there" \

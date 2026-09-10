@@ -35,7 +35,7 @@ Five checks, in that order.
 | `lane-stale` | you are in a worktree lane, which is read-only for this file. Report it and do nothing |
 | `missing` | run `/shepherd:init` — this is not a seeded instance |
 
-**Monitor** — confirm a `status-claims` monitor is among this session's background tasks. It is the primary status watcher and the harness owns it. If it is not running, say so in step 10 and fall back to arming the primary by hand with `shepherd-watch arm` per active card (the manual §6).
+**Monitor** — the status line names a running monitor count. **Expect none today, and arm the primary by hand:** `shepherd-watch arm T-NNNN` in the background per active card you own, which step 7 does anyway. The plugin's `status-claims` monitor declares `when: "on-skill-invoke:wake"`, and that trigger does not start it — measured 2026-09-10 on Claude Code 2.1.267; the CHANGELOG's known limitations hold the detail and why the declaration stays. Say in step 10 which of the two you are on.
 
 ### 2. Identity
 

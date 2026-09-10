@@ -22,7 +22,13 @@ mkdir my-shepherd && cd my-shepherd && git init
 claude
 ```
 
-and run `/shepherd:init`. It seeds the instance skeleton, asks you the handful of
+and run `/shepherd:init`, then **accept the workspace trust dialog once** — until you
+do, Claude Code ignores the permission rules in the instance's own
+`.claude/settings.json` entirely and prompts for commands that list already
+covers (measured 2026-09-10 on Claude Code 2.1.267). The plugin's hooks and
+commands are not gated that way and work immediately.
+
+`/shepherd:init` seeds the instance skeleton, asks you the handful of
 questions it cannot answer itself, writes `.shepherd/instance.env`, installs the
 context-meter status line and seeds the project registry.
 
