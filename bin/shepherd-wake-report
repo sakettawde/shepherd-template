@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Wake steps 5-9 as one read (CLAUDE.md S8; skills/wake/SKILL.md). Spec:
+# docs/specs/2026-09-06-procedure-scripts-design.md S4. Enumerates, repairs
+# nothing, takes no lock. One line per finding, the first word the kind:
+#
+#   ACTIVE-MINE | ACTIVE-OTHER                 step 5   active cards, split by owner
+#   LOCK-OK | LOCK-STALE | LOCK-ORPHAN |
+#   LOCK-HELD-LIVE | LOCK-UNRESOLVED |
+#   LOCK-MISSING | LOCK-MISMATCH               step 6   project locks against my cards
+#   PANE-LIVE | PANE-GONE | PANE-UNRESOLVED |
+#   PANE-NONE | CLAIMING                       step 7   panes of my active cards
+#   WATCH-OK | WATCH-MISSING                   step 8   shepherd-watch check per card
+#   INBOX yours|none|unreachable [operators=empty]
+#                                              step 8   shepherd-inbox owner (exit 0|3|1); on yours, the
+#                                                       trailing token when the Worker's operator_ids
+#                                                       is empty (shepherd-inbox operators prints nothing)
+#   QUEUE-MINE                                 step 9   my queue, oldest first
+#   INSTANCE                                   step 10  every identity lock, resolved
+#   STATUS ...                                 step 10  the one line to the operator
+#
+# Exit 0 when every line is routine, 3 when a line needs an act or a report
+# (the code the two sweeps use), 2 when SHEPHERD_ID is unset or malformed.
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$HERE/../lib/shepherd-common.sh"
+LOCK="$HERE/shepherd-lock"; WATCH="$HERE/shepherd-watch"; INBOX="$HERE/shepherd-inbox"; ROLL="$HERE/shepherd-rollover"
+# SHEPHERD_INBOX_SCRIPT is a test seam (the probe stubs shepherd-inbox's answers), inert
+# unless hooks_active - the same gate as the liveness overrides and shepherd-watch's copy.
+if hooks_active && [ -n "${SHEPHERD_INBOX_SCRIPT:-}" ]; then INBOX=$SHEPHERD_INBOX_SCRIPT; fi
+ME=${SHEPHERD_ID:-}
+[ -n "$ME" ] || { echo "ERROR SHEPHERD_ID is unset"; exit 2; }
+valid_shepherd_id "$ME" >/dev/null 2>&1 || { echo "ERROR bad SHEPHERD_ID: $ME"; exit 2; }
+RC=0
+attn() { RC=3; }
+MINE=() OTHERS=() ORPHANS=()
+declare -A CSTATE CPROJ CPANE CSESS COWNER LOCK_REPORTED
+
+# --- step 5: active cards -------------------------------------------------------
+for f in $(active_cards); do
+  id=$(basename "$f" .md)
+  CSTATE[$id]=$(card_field "$f" state)
+  CPROJ[$id]=$(card_field "$f" project) || CPROJ[$id]=
+  CPANE[$id]=$(card_field "$f" pane) || CPANE[$id]=none
+  CSESS[$id]=$(card_field "$f" session) || CSESS[$id]=none
+  COWNER[$id]=$(card_owner "$f")
+  if [ "${COWNER[$id]}" = "$ME" ]; then
+    MINE+=("$id")
+    echo "ACTIVE-MINE $id ${CSTATE[$id]} ${CPROJ[$id]} pane=${CPANE[$id]} session=${CSESS[$id]}"
+  else
+    OTHERS+=("$id")
+    echo "ACTIVE-OTHER $id ${CSTATE[$id]} ${CPROJ[$id]} owner=${COWNER[$id]} pane=${CPANE[$id]}"
+  fi
+done
+
+# --- step 6: locks --------------------------------------------------------------
+for f in "$LOCKS_DIR"/project-*.lock; do
+  [ -e "$f" ] || continue
+  name=$(basename "$f" .lock); lane=${name#project-}
+  holder= pane= session= task=
+  read -r holder pane session task _ <<<"$(lock_line "$f")"
+  [ "$holder" = "$ME" ] || continue
+  st=""; [ -n "$task" ] && [ "$task" != none ] && st=$(task_state "$task")
+  if is_active_state "$st"; then
+    if [ "${COWNER[$task]:-}" != "$ME" ]; then echo "LOCK-MISMATCH $name held by me over $task owned by ${COWNER[$task]:-?} - report"; attn; LOCK_REPORTED[$name]=1
+    elif [ "${CPROJ[$task]:-}" != "$lane" ]; then echo "LOCK-MISMATCH $name held by me, but $task names ${CPROJ[$task]:-?} - report"; attn; LOCK_REPORTED[$name]=1
+    else echo "LOCK-OK $name $task"; fi
+  else echo "LOCK-STALE $name held by me over ${task:-none} (${st:-none}) - release"; attn; LOCK_REPORTED[$name]=1; fi
+done
+for id in "${MINE[@]}"; do
+  # A reply card (kind: reply) runs on a throwaway worktree that takes no lane
+  # lock by design (templates/reply-card.md): no lock to miss, and the build
+  # lane's lock beside it is not over this card.
+  [ "$(card_kind "$TASKS_DIR/$id.md")" != reply ] || continue
+  lane=${CPROJ[$id]}; f="$LOCKS_DIR/project-$lane.lock"
+  if [ ! -f "$f" ]; then echo "LOCK-MISSING $id (mine, ${CSTATE[$id]}) has no project-$lane lock - report"; attn; continue; fi
+  holder= pane= session= task=
+  read -r holder pane session task _ <<<"$(lock_line "$f")"
+  if [ "$holder" = "$ME" ]; then
+    if [ "$task" != "$id" ] && [ -z "${LOCK_REPORTED[project-$lane]:-}" ]; then
+      echo "LOCK-MISMATCH project-$lane names $task, card $id - report"; attn
+    fi
+    continue
+  fi
+  shepherd_live "$pane" "$session" "$holder"
+  case $? in
+    0) echo "LOCK-HELD-LIVE project-$lane held by $holder (live) over $id (mine) - report"; attn ;;
+    1) echo "LOCK-ORPHAN project-$lane held by $holder (gone) over $id (mine) - takeover"; ORPHANS+=("$id"); attn ;;
+    *) echo "LOCK-UNRESOLVED project-$lane held by $holder (unresolved) over $id (mine) - report"; attn ;;
+  esac
+done
+
+# --- step 7: panes --------------------------------------------------------------
+for id in "${MINE[@]}"; do
+  pane=${CPANE[$id]}; sess=${CSESS[$id]}
+  case $pane in
+    claiming-*) echo "CLAIMING $id $pane - dispatch died mid-claim: shepherd-preflight undo $id"; attn; continue ;;
+    none|'')    echo "PANE-NONE $id - no pane on the card - report"; attn; continue ;;
+  esac
+  if [ "$sess" = none ] || [ -z "$sess" ]; then
+    sid=$(pane_probe "$pane" 2>/dev/null); rc=$?
+    case $rc in
+      0) echo "PANE-LIVE $id $pane session=missing agent_session=$sid - backfill"; attn ;;
+      1) echo "PANE-GONE $id $pane - mark blocked and investigate"; attn ;;
+      *) echo "PANE-UNRESOLVED $id $pane - herdr unreachable"; attn ;;
+    esac
+    continue
+  fi
+  pair_live "$pane" "$sess"
+  case $? in
+    0) echo "PANE-LIVE $id $pane session=match" ;;
+    1) echo "PANE-GONE $id $pane - mark blocked and investigate"; attn ;;
+    *) echo "PANE-UNRESOLVED $id $pane - herdr unreachable"; attn ;;
+  esac
+done
+
+# --- step 8: watchers, inbox ------------------------------------------------------
+for id in "${MINE[@]}"; do
+  missing=$(bash "$WATCH" check "$id" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ]; then echo "WATCH-OK $id"
+  else echo "WATCH-MISSING $id $(printf '%s\n' "$missing" | grep -v unarmable | grep -v '^ERROR' | paste -sd, -) - shepherd-watch rearm $id"; attn; fi
+done
+bash "$INBOX" owner >/dev/null 2>&1
+case $? in 0) INBOX_STATE=yours ;; 3) INBOX_STATE=none ;; *) INBOX_STATE=unreachable ;; esac
+# Yours, but the Worker names no operator (spec 2026-09-07 §4): every author then
+# reads operator false and every Linear ruling falls back to the pane. Said once,
+# as a trailing token, so the first word stays what the wake skill reads; an
+# operators call that fails says nothing, because it knows nothing.
+INBOX_NOTE=
+if [ "$INBOX_STATE" = yours ]; then
+  ops=$(bash "$INBOX" operators 2>/dev/null) && [ -z "$ops" ] && INBOX_NOTE=" operators=empty"
+fi
+INBOX_STATE="$INBOX_STATE$INBOX_NOTE"
+echo "INBOX $INBOX_STATE"
+
+# --- step 9: my queue -----------------------------------------------------------
+for f in $(grep -l '^state: queued' "$TASKS_DIR"/T-[0-9][0-9][0-9][0-9].md 2>/dev/null); do
+  [ "$(card_owner "$f")" = "$ME" ] || continue
+  cr=$(card_field "$f" created) || cr=-
+  printf '%s %s %s\n' "$cr" "$(basename "$f" .md)" "$(card_field "$f" project)"
+done | sort | while read -r cr id proj; do echo "QUEUE-MINE $id $proj created=$cr"; done
+
+# --- step 10: instances, status ---------------------------------------------------
+OTHERS_DESC=()
+for f in "$LOCKS_DIR"/shepherd-*.lock; do
+  [ -e "$f" ] || continue
+  id=$(basename "$f" .lock); case $id in *.reclaim) continue ;; esac
+  word= pane=
+  read -r word _ pane _ <<<"$(bash "$LOCK" live "$id" 2>/dev/null)"
+  tasks=$(for t in "${MINE[@]}" "${OTHERS[@]}"; do [ "${COWNER[$t]}" = "$id" ] && echo "$t"; done | paste -sd, -)
+  you=""; [ "$id" = "$ME" ] && you=" (you)"
+  echo "INSTANCE $id ${word:-unresolved} pane=${pane:--} tasks=${tasks:--}$you"
+  if [ "$id" != "$ME" ]; then
+    desc="$id"; [ "$word" != live ] && desc="$id (${word:-unresolved})"
+    OTHERS_DESC+=("$desc ${tasks:--}")
+  fi
+done
+# ctx: the operator wants the PERCENT (CLAUDE.md S8), not the bare decide verdict. `ctx`
+# (no pane arg - reads HERDR_PANE_ID) returns early, before any herdr call, when the pane
+# is unset (shepherd-rollover's probe_ctx) - that's what keeps this cheap in the sandbox
+# and unreadable-pane cases. Only on its success do we also ask `decide` for the word.
+ctxline=$(bash "$ROLL" ctx 2>/dev/null); ctxrc=$?
+if [ "$ctxrc" -eq 0 ] && [ -n "$ctxline" ]; then
+  ctxpct=$(printf '%s' "$ctxline" | awk '{print $1}')
+  ctxword=$(bash "$ROLL" decide 2>/dev/null | head -1); ctxword=${ctxword:-unknown}
+  ctx="${ctxpct}% (${ctxword})"
+else
+  ctx=unknown
+fi
+others=$(IFS=,; echo "${OTHERS_DESC[*]:-none}"); others=${others//,/, }
+orphans=$(IFS=,; echo "${ORPHANS[*]:-none}"); orphans=${orphans//,/, }
+echo "STATUS ctx $ctx, active: ${MINE[*]:-none}; others: $others; inbox: $INBOX_STATE; orphans: $orphans"
+exit "$RC"

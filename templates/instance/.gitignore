@@ -1,0 +1,7 @@
+.claude/settings.local.json
+.shepherd/local.env
+ledger/locks/
+ledger/shepherds/
+ledger/watchers/
+ledger/events.log
+__pycache__/

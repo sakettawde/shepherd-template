@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Reports whether the output style a Claude Code session starts with keeps Claude Code's
+# built-in software-engineering instructions (CLAUDE.md §6; wake step 1; T-0233).
+#
+# Usage:
+#   shepherd-output-style                 the operator's USER-level style — the one every worker
+#                                         starts with, because workers launch in project repos
+#                                         where (as of 2026-09-06) no project file sets
+#                                         outputStyle. Managed settings outrank it and are read
+#                                         first. This is the wake-time form: resolving from the
+#                                         shepherd checkout instead would read its own
+#                                         settings.local.json (Concise) and never see the
+#                                         user-level style the workers actually inherit.
+#   shepherd-output-style <project-dir>   the style a session started in <project-dir> resolves,
+#                                         the way Claude Code does.
+#
+# One "style: ..." line per finding, then "style: ok" (exit 0) or "style: DEGRADED" (exit 1);
+# exit 2 on a usage error. READ-ONLY: a DEGRADED line names the file and the one-line repair,
+# and the check never edits the operator's files — that is the operator's call.
+#
+# Contract, all read 2026-09-06:
+# - Output styles (https://code.claude.com/docs/en/output-styles): "Custom output styles leave
+#   out Claude Code's built-in software engineering instructions, such as how to scope changes,
+#   write comments, and verify work, unless `keep-coding-instructions` is set to `true`"
+#   (default `false`). Built-ins: Default, Proactive, Concise, Explanatory, Learning. Custom
+#   files live in `~/.claude/output-styles` and in every `.claude/output-styles/` between the
+#   working directory and the repository root (closest wins); "The file name becomes the style
+#   name unless you set `name` in the frontmatter." The setting "is read once at session start",
+#   so a repair reaches the next session or `/clear`, never a running one.
+# - Settings (https://code.claude.com/docs/en/settings): precedence managed > `--settings` >
+#   `.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.json`. The
+#   local file is read at the repository root, and "In a worktree, it uses the file at the main
+#   checkout's root" — except outside a git repository or when that root is $HOME, where it
+#   stays beside `.claude/settings.json` in the working directory.
+# Outside this check's sight: a `--settings` file passed on one command line, and a plugin
+# style with `force-for-plugin: true`, which overrides the setting (no installed plugin ships
+# an output-styles/ directory, measured 2026-09-06). Names are compared exactly.
+set -uo pipefail
+
+MANAGED=${OSC_MANAGED:-/etc/claude-code/managed-settings.json}
+BUILTINS="Default Proactive Concise Explanatory Learning"
+
+usage() { echo "usage: shepherd-output-style [project-dir]   (see the header for what each form resolves)"; }
+
+dir=""
+case "${1:-}" in
+  "") ;;
+  -h|--help) usage; exit 0 ;;
+  -*) echo "output-style-check: unknown argument $1 ($(usage))" >&2; exit 2 ;;
+  *) dir=$1; [ -d "$dir" ] || { echo "output-style-check: not a directory: $dir" >&2; exit 2; } ;;
+esac
+if [ $# -gt 1 ]; then echo "output-style-check: too many arguments ($(usage))" >&2; exit 2; fi
+
+# json_key <file> <key> — prints the key's value; exit 1 when the file is absent, unparseable
+# or lacks the key. Settings files are strict JSON, so python3 (already required by
+# shepherd-statusline) is the parser.
+json_key() {
+  [ -f "$1" ] || return 1
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get(sys.argv[2])
+except Exception:
+    sys.exit(1)
+if v is None or v == "":
+    sys.exit(1)
+print(v)
+PY
+}
+
+# frontmatter <file> — the lines between the opening --- and the closing ---; nothing when
+# the file has no frontmatter.
+frontmatter() {
+  awk 'NR==1 { if ($0 != "---") exit; next } /^---[[:space:]]*$/ { exit } { print }' "$1"
+}
+# style_name <file> — the `name:` frontmatter value, else the file name without .md.
+style_name() {
+  local n
+  n=$(frontmatter "$1" | sed -n 's/^name:[[:space:]]*//p' | head -1 \
+        | sed -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+  if [ -n "$n" ]; then printf '%s\n' "$n"; else basename "$1" .md; fi
+}
+keeps_coding() { frontmatter "$1" | grep -qE '^keep-coding-instructions:[[:space:]]*true[[:space:]]*$'; }
+
+# --- which settings files, in precedence order ------------------------------------------
+candidates=("managed|$MANAGED")
+style_dirs=()
+if [ -n "$dir" ]; then
+  dir=$(cd "$dir" && pwd -P)
+  toplevel=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)
+  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [ -n "$toplevel" ] && [ -n "$common" ] && [ "$(dirname "$common")" != "$HOME" ]; then
+    mainroot=$(dirname "$common")            # the main checkout's root; == toplevel outside a worktree
+    localfile="$mainroot/.claude/settings.local.json"
+    where="project local file at the main checkout $mainroot"
+  else
+    toplevel=$dir; mainroot=$dir
+    localfile="$dir/.claude/settings.local.json"
+    where="not a git repository below \$HOME, so the local file sits in $dir"
+  fi
+  candidates+=("project local|$localfile" "project|$toplevel/.claude/settings.json")
+  echo "style: scope $dir — resolved as a session started there ($where)"
+  d=$dir
+  while :; do                                # every .claude/output-styles/ from dir up to the root, closest first
+    style_dirs+=("$d/.claude/output-styles")
+    [ "$d" = "$toplevel" ] || [ "$d" = "/" ] && break
+    d=$(dirname "$d")
+  done
+else
+  echo "style: scope user level — the style every worker starts with in a project repo that sets none"
+fi
+candidates+=("user|$HOME/.claude/settings.json")
+style_dirs+=("$HOME/.claude/output-styles")
+
+# --- the setting ----------------------------------------------------------------------
+style="" from="" level="" levels=""
+for c in "${candidates[@]}"; do
+  lvl=${c%%|*}; f=${c#*|}
+  levels="${levels:+$levels, }$lvl"
+  if v=$(json_key "$f" outputStyle); then style=$v; from=$f; level=$lvl; break; fi
+done
+if [ -z "$style" ]; then
+  echo "style: no outputStyle set at any level read ($levels) — sessions run the built-in Default, coding instructions kept"
+  echo "style: ok"; exit 0
+fi
+echo "style: outputStyle \"$style\" from $from ($level)"
+case " $BUILTINS " in
+  *" $style "*)
+    echo "style: $style is a built-in style — coding instructions kept"
+    echo "style: ok"; exit 0 ;;
+esac
+
+# --- a custom style: find its file, then the field ------------------------------------
+found=""
+for sd in "${style_dirs[@]}"; do
+  [ -d "$sd" ] || continue
+  for f in "$sd"/*.md; do
+    [ -f "$f" ] || continue
+    if [ "$(style_name "$f")" = "$style" ]; then found=$f; break 2; fi
+  done
+done
+if [ -z "$found" ]; then
+  echo "style: DEGRADED — \"$style\" is neither a built-in style nor the name of a file under ${style_dirs[*]} (names compared exactly; name: frontmatter before file name), so the session has no style to load (repair: fix the outputStyle value in $from, or add the style file)"
+  echo "style: DEGRADED"; exit 1
+fi
+if keeps_coding "$found"; then
+  echo "style: $style -> $found, custom with keep-coding-instructions: true — Claude Code's software-engineering instructions stay in the prompt"
+  echo "style: ok"; exit 0
+fi
+echo "style: DEGRADED — $found has no keep-coding-instructions: true, so every session on $style runs without Claude Code's software-engineering instructions: how to scope changes, write comments, verify work (repair: add keep-coding-instructions: true to its frontmatter; a new session or /clear picks it up, a running session does not)"
+echo "style: DEGRADED"; exit 1

@@ -1,56 +1,125 @@
-# shepherd-template
+# shepherd
 
-**Shepherd** is a thin orchestrator pattern for Claude Code: one Claude session that routes your stream of thoughts to your projects, dispatches worker Claude sessions in [herdr](https://herdr.dev) panes to do the actual work, watches them via hook-written status files, verifies results against git facts and a Definition-of-Done command it runs itself, and records everything in a git-tracked ledger. Shepherd never edits project code in its own context — it routes, briefs, verifies, decides, and remembers.
+A thin orchestrator for Claude Code, packaged as a plugin.
 
-Two or more shepherd sessions can share one clone. Each launches with its own `SHEPHERD_ID`, owns only the task cards it created, and coordinates through filesystem locks in `ledger/locks/` — see `docs/specs/multi-shepherd-design.md`.
+Shepherd receives a stream of thoughts from you, routes them to onboarded
+projects, dispatches worker Claude Code sessions in [herdr](https://github.com/)
+panes to do the actual work, watches them, unblocks them, verifies their results
+against ground truth, and remembers. It never does project work in its own
+context.
 
-This repo is the **framework**: skills, hooks, scripts, and an empty ledger/registry. Your instance's state (tasks, project cards, decisions) accumulates in your clone and never syncs back.
-
-## Prerequisites
-
-- **herdr 0.8.2** installed, with its server running — shepherd is herdr-native and refuses to dispatch outside it (`HERDR_ENV=1`).
-- **Claude Code** with access to capable models (worker tiers default to `opus --effort high` / `opus --effort xhigh` — adjust in `CLAUDE.md` §6 if your plan differs).
-- The **superpowers** Claude Code plugin installed — worker briefs mandate its skills (brainstorming, test-driven-development, writing-plans, subagent-driven-development), and the retro skill proposes framework edits via writing-skills.
-- Linux/WSL with `bash`, `git` and `python3` (hooks, locks and JSON parsing use them; no jq needed). The coordination scripts rely on `link(2)` and atomic rename, so keep the clone on a local filesystem — re-verify before running it from a network or translated mount.
-- A code directory containing the project repos you want shepherd to manage.
-
-## Setup
+## Install
 
 ```bash
-git clone <your-copy-of-this-template> shepherd && cd shepherd
+claude plugin marketplace add sakettawde/shepherd-plugin
+claude plugin install shepherd@shepherd-plugins --scope user
+```
+
+Then create the repository that holds your data, and initialise it:
+
+```bash
+mkdir my-shepherd && cd my-shepherd && git init
 claude
 ```
 
-Run the clone-and-launch above **from a pane inside herdr** — init-shepherd's environment gate (`HERDR_ENV`, version pin) refuses to run outside it. Then tell Claude: **run the init-shepherd skill**. It gates on the herdr version, interviews you (name, code directory, notification preferences, worker cap, shepherd-id scheme), writes the `## 0. Operator` block in `CLAUDE.md`, registers the three worker hooks in your user-global `~/.claude/settings.json`, and seeds `registry/projects.md` from your code directory.
+and run `/shepherd:init`. It seeds the instance skeleton, asks you the handful of
+questions it cannot answer itself, writes `.shepherd/instance.env`, installs the
+context-meter status line and seeds the project registry.
 
-Daily launch, from a pane inside herdr — the env var, `-n` and `--remote-control` all carry the same id:
+User scope is the right scope: workers launch in arbitrary project directories,
+so a project-scope install would have to be added to every repository you work
+in. Every command refuses outside a shepherd instance, and every worker hook
+exits immediately without `SHEPHERD_TASK_ID`, so the plugin is inert in your
+unrelated sessions.
 
-```bash
-cd <your shepherd clone> && SHEPHERD_ID=shepherd-1 claude -n shepherd-1 --remote-control shepherd-1
+## Requirements
+
+- Claude Code 2.1.258 or later (measured against 2.1.267).
+- [herdr](https://github.com/) 0.8.2 — the terminal multiplexer shepherd drives.
+  The pin is in the manual §7; a different version stops dispatch until the
+  adapter recipes are regenerated.
+- `git` 2.31 or later (`git rev-parse --path-format=absolute`), `python3`, `bash`.
+
+## What an instance repository holds
+
+Data only:
+
+```
+CLAUDE.md                    ~15 lines: imports the two files below
+.claude/shepherd-manual.md   GENERATED from the plugin, committed, never edited
+.claude/settings.json        your permission rules
+.shepherd/instance.env       the operator facts, committed
+.shepherd/local.env          machine-specific overrides, gitignored
+ledger/                      task cards, status JSONLs, attachments
+registry/                    the project index and one card per project
+decisions/                   the decision log
+docs/reports/                whatever you keep
 ```
 
-A second concurrent instance launches identically with `shepherd-2`, and so on. `-n` is what peers address to hand off a freed queue; `--remote-control` is what the Claude mobile and desktop apps show. A session launched without `-n` takes an auto name and no peer can reach it (CLAUDE.md §1).
+Everything else — the skills, the worker hooks, the ledger commands, the manual,
+the framework specs and the test harness — is this plugin. There is no second
+copy of a framework file to keep in step, and nothing to personalise.
 
-**Moving to a new machine:** clone your instance repo, open Claude in it, re-run init-shepherd. It re-registers hooks with the new paths and touches nothing else.
+## What the plugin provides
 
-## How it works
-
-Every message you send is triaged into exactly one of: an answer, context ingestion, a clarifying question, or a task card. Tasks flow `captured → queued → briefed → working → blocked → review → done|failed`, each transition a git commit. Workers get a one-line kickoff pointing at their task card; two background watchers (a status-file grep and a herdr stall wait) wake shepherd on completion or blockage; a four-source verification ladder (status file → git facts → DoD run → pane tail) decides whether "done" is true. Projects must be **onboarded** (deep scan + your Q&A → registry card + project CLAUDE.md) before they accept tasks.
-
-Concurrency is filesystem-coordinated: `scripts/shepherd-identity.sh` claims an instance id, `scripts/lock.sh` guards one active task per working copy plus the worker cap, `scripts/reserve-task-id.sh` hands out `T-NNNN` ids race-free, and `scripts/ledger-commit.sh` commits path-scoped so two instances never clobber each other's index. Every reclaim is gated on liveness — a pane that cannot be resolved is reported, never assumed dead.
-
-Read `CLAUDE.md` — it is the operating manual the shepherd session itself runs on.
-
-## Fresh-clone drill (self-verify after setup)
-
-1. init-shepherd completed: `CLAUDE.md` `## 0. Operator` holds your values; `grep -c '^| ' registry/projects.md` counts your projects + 1 header row.
-2. Hooks registered: `python3 -c "import json,pathlib;print(json.dumps(json.load(open(pathlib.Path.home()/'.claude/settings.json'))['hooks']['Stop'],indent=1))"` shows a command pointing into *this clone's* `hooks/`.
-3. Stub worker check: `SHEPHERD_TASK_ID=T-TEST SHEPHERD_STATUS_FILE=$PWD/ledger/status/T-TEST.jsonl sh hooks/worker-stop.sh </dev/null` then confirm `ledger/status/T-TEST.jsonl` contains a `"event": "stop"` line; delete the file afterwards.
-4. Coordination scripts: `bash scripts/tests/run.sh` ends `ALL TESTS PASSED`. It runs entirely in temp sandboxes and never touches your ledger.
-5. Crash-window drill: `bash scripts/drill.sh` ends `DRILL: N passed, 0 failed` — it exercises reservation contention, same-id boot, parallel commits, and the orphan rule.
-6. Identity: from inside a herdr pane, `SHEPHERD_ID=shepherd-1 bash scripts/shepherd-identity.sh acquire` prints `IDENTITY shepherd-1 pane=… session=…` and creates `ledger/locks/shepherd-1.lock` (gitignored). Run it again — it prints `(already mine)`, never a second claim.
-7. Grep cookbook: the recipes in `CLAUDE.md` §5 find nothing on a fresh clone — expect empty results, plus `No such file or directory` from the unexpanded globs until your first task card and project card exist.
+| Component | What |
+|---|---|
+| `skills/` | `/shepherd:wake`, `:triage`, `:dispatch`, `:monitor`, `:retro`, `:onboard`, `:init`, and `herdr-adapter` (model-invoked only) |
+| `hooks/hooks.json` | the worker hooks — `Stop`, `Notification`, `PreToolUse Bash`, `PermissionRequest`, `PermissionDenied`, `StopFailure`, `SessionEnd` — plus the instance `SessionStart` hook that refreshes the manual copy |
+| `bin/` | `shepherd-status`, `shepherd-lock`, `shepherd-card`, `shepherd-commit` and the rest, as bare commands on the Bash tool's `PATH` |
+| `monitors/monitors.json` | `status-claims`, the harness-owned watcher over `ledger/status/` |
+| `manual/shepherd.md` | the operating manual an instance imports |
+| `templates/instance/` | the skeleton `/shepherd:init` copies into a fresh instance |
+| `lib/` | the shared helpers every command sources — `shepherd-common.sh` resolves `SHEPHERD_ROOT` and holds the lock and card primitives |
 
 ## Updating
 
-Framework improvements land in this template first. In your instance: `git remote add template <template-url>`, then cherry-pick framework commits as they appear. `FRAMEWORK.md` lists which paths are framework (safe to pull) vs instance state (never crosses).
+```bash
+claude plugin update shepherd@shepherd-plugins
+```
+
+Auto-update is off by default for third-party marketplaces, which is what you
+want: a framework update landing mid-dispatch is exactly the surprise the
+version gate exists to prevent. A running session and every running worker keep
+the version they loaded, so an update never interrupts a task. Wake step 1 reads
+the installed version, refuses below `SHEPHERD_MIN_PLUGIN`, and reports a newer
+release.
+
+## Developing
+
+```bash
+git clone git@github.com:sakettawde/shepherd-plugin.git
+cd shepherd-plugin
+bash tests/run.sh
+claude plugin validate . --strict
+```
+
+To run a shepherd instance on your working copy instead of the installed
+version, launch it with `--plugin-dir`:
+
+```bash
+cd <your instance> && SHEPHERD_ID=shepherd-1 claude -n shepherd-1 --plugin-dir <path to this checkout>
+```
+
+A `--plugin-dir` plugin takes precedence over an installed plugin of the same
+name for that session only, so one instance runs the working copy while every
+other session keeps the release. `/reload-plugins` picks up skill, hook and bin
+changes mid-session; monitors need a restart.
+
+**Plugin first, always.** A framework change is a task card against this
+repository, tested here and under `--plugin-dir`, released as a version, and
+adopted by each instance at its next wake. Instances never carry framework
+edits; a rule only one instance needs goes under `## Local overrides` in its
+thin `CLAUDE.md`.
+
+## Releasing
+
+```bash
+# bump "version" in .claude-plugin/plugin.json AND the marketplace entry — they
+# must agree or `claude plugin tag` refuses — and add a CHANGELOG.md entry
+claude plugin tag --push          # creates and pushes shepherd--v<X.Y.Z>
+```
+
+## License
+
+MIT.

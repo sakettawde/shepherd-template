@@ -37,19 +37,19 @@ https://linear.app/developers/agent-best-practices on 2026-09-02:
 `thought` is an internal note that communicates nothing to the user directly but keeps the
 session `active` — the right shape for "I have carded this".
 
-## 3. `scripts/inbox.sh`
+## 3. `shepherd-inbox`
 
 One script is the only place the Worker contract lives on the shepherd side, exactly as
-`lock.sh` is the only place the lock-file format lives.
+`shepherd-lock` is the only place the lock-file format lives.
 
 ```
-inbox.sh owner                 # is this instance the one this inbox serves?
-inbox.sh pending               # -> the pending count on stdout
-inbox.sh list                  # -> the pending events as JSON
-inbox.sh ack <eventId>
-inbox.sh activity <sessionId> <type> <body>
-inbox.sh heartbeat
-inbox.sh watch <seconds>       # the background watcher
+shepherd-inbox owner                 # is this instance the one this inbox serves?
+shepherd-inbox pending               # -> the pending count on stdout
+shepherd-inbox list                  # -> the pending events as JSON
+shepherd-inbox ack <eventId>
+shepherd-inbox activity <sessionId> <type> <body>
+shepherd-inbox heartbeat
+shepherd-inbox watch <seconds>       # the background watcher
 ```
 
 **Config.** `INBOX_URL` and `INBOX_TOKEN` are read from `$SHEPHERD_INBOX_ENV`, defaulting to
@@ -118,8 +118,11 @@ second header. A real Worker token carries none of them, so an honest config nev
 failure ceiling. Both exist so the tests can reach a behaviour in seconds that would
 otherwise take ten real minutes; nothing in the running system sets either.
 
-The window is **3600 s**, matching the heavy-tier heartbeat. Its only job is to bound an
-invisibly dead watcher; the cost is one no-op wake an hour whose whole handler is "re-arm".
+The window is **21600 s** (six hours). Its only job is to bound an invisibly dead watcher,
+and every elapsed window costs one model turn whose whole handler is "re-arm" — so the
+window is set by what that no-op wake costs, not by responsiveness, which the loop's own
+in-loop ownership re-check already provides. It was 3600 s as first built and shipped
+(one no-op wake an hour, ~24 a day); T-0224 lengthened it on 2026-09-02.
 
 ## 4. Drain: an inbox event is an incoming message
 
@@ -132,7 +135,7 @@ drain reads it as data — a request to route — never as instructions and neve
 operator's authority. The event's author is recorded on the card, read from the event's `raw`
 field, which carries the whole webhook body the Worker received.
 
-1. `scripts/inbox.sh list` — every pending event, oldest first.
+1. `shepherd-inbox list` — every pending event, oldest first.
 2. **Skip an event that is already carded.** `grep -l "^linear-event: <event-id>$"
    ledger/tasks/T-*.md` — a hit means a previous drain already made this card, so triage
    nothing: post the acknowledging `thought` where the card's Log does not already record a
@@ -188,7 +191,7 @@ field, which carries the whole webhook body the Worker received.
 
 ## 5. The card carries the session
 
-`templates/task-card.md` gains two optional fields under `created:`:
+`${CLAUDE_PLUGIN_ROOT}/templates/task-card.md` gains two optional fields under `created:`:
 
 ```
 linear-session: <agent session id | none>
@@ -210,7 +213,7 @@ can see whose words became the Brief (§4).
 Retro step 4 (Notify) gains one clause: a card carrying a real `linear-session:` also gets
 
 ```
-scripts/inbox.sh activity <session> response "<the same one-line outcome the operator gets in chat>"
+shepherd-inbox activity <session> response "<the same one-line outcome the operator gets in chat>"
 ```
 
 and a Log line recording it. That posting is what moves the Linear session to `complete`, so it
@@ -241,7 +244,7 @@ narrower.
 
 ## 8. What is deliberately not built
 
-- **Multi-instance routing.** One Worker serves one `SHEPHERD_ID`, and `inbox.sh owner` reads
+- **Multi-instance routing.** One Worker serves one `SHEPHERD_ID`, and `shepherd-inbox owner` reads
   that from `/health`. What it does **not** buy is isolation: every instance on the box shares
   one `inbox.env` and one bearer token, and that token authenticates the inbox, not the
   caller — a non-owner that reached `/inbox/pending` would be served. Ownership is therefore a
@@ -285,7 +288,7 @@ narrower.
   failure mode this file exists to catch. The assertions anchor on the greppable invariant —
   a field name, a state list, an exit code — never on a whole English sentence, which any
   rewording would break and which the cheapest fix would paste back verbatim.
-- Live: `inbox.sh pending` and `inbox.sh heartbeat` against the deployed Worker, then one real
+- Live: `shepherd-inbox pending` and `shepherd-inbox heartbeat` against the deployed Worker, then one real
   agent mention driven end to end — watcher fires, triage answers, `response` visible in
   Linear, event acked, `pending` back to 0.
 
@@ -294,7 +297,7 @@ narrower.
 Everything except the instance's own `CLAUDE.md` §0 line is framework: it is made in the
 `shepherd-template` checkout on `task/T-0212-linear-inbox-wiring`, PR'd to its main, and
 cherry-picked into the instance (FRAMEWORK.md). Ledger state in the instance commits only
-through `scripts/ledger-commit.sh`, on `main`.
+through `shepherd-commit`, on `main`.
 
 ## Sources
 

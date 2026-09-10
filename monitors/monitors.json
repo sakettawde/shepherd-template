@@ -1,0 +1,8 @@
+[
+  {
+    "name": "status-claims",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/shepherd-watch monitor",
+    "description": "new terminal claims and worker session events in the instance ledger",
+    "when": "on-skill-invoke:wake"
+  }
+]

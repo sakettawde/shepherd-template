@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# shepherd-paths [<relative-path>]
+#
+# Prints the installed plugin's root, or a path inside it. This exists because
+# ${CLAUDE_PLUGIN_ROOT} cannot be used outside two places, both measured
+# 2026-09-10 on Claude Code 2.1.267:
+#
+#   substituted     SKILL.md content; hooks.json and monitors.json commands
+#   NOT substituted a skills/*/references/ file read with the Read tool — the
+#                   text arrives literally
+#   EXPANDS EMPTY   any command run through the Bash tool. The variable is
+#                   unset there, so "${CLAUDE_PLUGIN_ROOT}/hooks/x.json" becomes
+#                   "/hooks/x.json" — a wrong absolute path, with no error.
+#
+# So: a shell command that needs a plugin file calls this, and never the
+# placeholder. Bare on PATH while the plugin is enabled, self-locating from $0.
+#
+#   shepherd-paths                        -> /path/to/plugin
+#   shepherd-paths hooks/reply-permissions.json
+#   shepherd-paths manual/shepherd.md
+#
+# Exit 0 with the path; 1 when the path does not exist; 2 when it escapes the
+# plugin root. A path is printed only when it resolves inside the plugin.
+set -u
+
+HERE=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd -P "$HERE/.." && pwd)
+
+rel=${1:-}
+if [ -z "$rel" ]; then printf '%s\n' "$ROOT"; exit 0; fi
+case $rel in
+  /*) echo "shepherd-paths: give a path relative to the plugin root, not '$rel'" >&2; exit 2 ;;
+esac
+
+target="$ROOT/$rel"
+resolved=$(cd -P "$(dirname "$target")" 2>/dev/null && printf '%s/%s' "$(pwd)" "$(basename "$target")") || {
+  echo "shepherd-paths: no such path in the plugin: $rel" >&2; exit 1; }
+case $resolved in
+  "$ROOT"/*) ;;
+  *) echo "shepherd-paths: $rel escapes the plugin root" >&2; exit 2 ;;
+esac
+[ -e "$resolved" ] || { echo "shepherd-paths: no such path in the plugin: $rel" >&2; exit 1; }
+printf '%s\n' "$resolved"

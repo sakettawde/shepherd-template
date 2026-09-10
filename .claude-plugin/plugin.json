@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "shepherd",
+  "displayName": "Shepherd",
+  "description": "A thin orchestrator for Claude Code: route an operator's thoughts to onboarded projects, dispatch worker sessions in herdr panes, verify their results against ground truth, and remember. Ships the skills, the worker hooks, the ledger commands and the manual.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Saket Tawde",
+    "url": "https://github.com/sakettawde"
+  },
+  "homepage": "https://github.com/sakettawde/shepherd-plugin",
+  "repository": "https://github.com/sakettawde/shepherd-plugin",
+  "license": "MIT",
+  "keywords": ["orchestration", "agents", "herdr", "workflow", "ledger"]
+}

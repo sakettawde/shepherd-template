@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+# Worker watchers for one task, as one program (T-0214; spec
+# docs/superpowers/specs/2026-09-02-worker-observation-design.md §3-§4).
+#
+#   shepherd-watch arm   T-NNNN [status|stall] [--window S]   # blocks until something fires; run it as a BACKGROUND Bash task
+#   shepherd-watch rearm T-NNNN [--window S]                  # arms only what this session is missing; exits 4 at once if nothing is
+#   shepherd-watch check T-NNNN                               # prints the missing kinds, one per line; 0 = fully armed, 1 = not; arms nothing
+#   shepherd-watch list  [T-NNNN|inbox]                       # one line per record: task kind state pid=… window=… anchor=… armed=… session=… owner=…
+#   shepherd-watch arm   inbox [--window S]                   # the inbox watcher: shepherd-inbox watch as its one child, record inbox.<SHEPHERD_ID>, 21600 s unless given
+#   shepherd-watch rearm inbox [--window S]                   # arms it unless this session's is live (ARMED-ALREADY inbox, 4)
+#   shepherd-watch check inbox                                # prints `inbox` when nothing live holds the record; 0 = armed, 1 = not
+#
+# Two watchers, one process, one wake. `arm` with no kind runs the status-file
+# watcher and the herdr stall watcher as two children, waits for the first to
+# exit, kills the other, removes both records and exits with the winner's
+# verdict. A wake is this process exiting, so one arming produces exactly one
+# wake and never a stale sibling. Verdict = first stdout line; exit code for scripts:
+#   0   STATUS <what>     a wake-worthy record landed in the status file (the newest is named)
+#   3   BLOCKED           herdr reports the worker blocked on a prompt
+#   5   GONE              herdr reports no agent in the pane, confirmed by three pane probes over ~15 s
+#   124 TIMEOUT <window>s the window elapsed - the heartbeat backstop (30m S/M, 60m L/heavy)
+#   4   ARMED-ALREADY     rearm found nothing missing (a no-op wake)
+#   2   ERROR <why>       bad task id, no card, a --window that is not whole seconds,
+#                         no verb, nothing armable
+#   7   (stderr only)     herdr is unusable, so the stall watcher stood down. When the
+#                         status watcher is also armed this never surfaces - that one is
+#                         the primary and carries on alone. It IS the exit code of a
+#                         stall-only arm or re-arm, where nothing is left watching:
+#                         treat it as "herdr outage", not as a wake, and re-arm later.
+# Notes (STALL-SKIPPED, STALL-UNAVAILABLE) go to stderr and never displace the verdict.
+#
+# The third kind, `inbox` (T-0237; docs/specs/2026-09-07-linear-conversation-design.md
+# §7), is the Linear inbox watcher folded in: one process per INSTANCE, not per
+# task, under ledger/watchers/inbox.<SHEPHERD_ID>, so `list` and `check` see it,
+# a second `arm` replaces it like any other kind, and a rolled-over session's
+# watcher is `stale` for `rearm` to replace. `shepherd-inbox watch` keeps its
+# own exit codes and stays the one home of the Worker contract; this script maps
+# them, because its 3 and 4 above already mean BLOCKED and ARMED-ALREADY:
+#   0   INBOX WORK             shepherd-inbox 0: there is work to drain (monitor's inbox drain)
+#   124 INBOX TIMEOUT <window>s shepherd-inbox 124: the window elapsed with nothing pending - re-arm
+#   6   INBOX UNREACHABLE      shepherd-inbox 4: the Worker was unreachable for its whole ceiling - re-arm, say so once
+#   8   INBOX NOT-CONFIGURED   shepherd-inbox 3: no usable config, or the inbox serves another instance - report, no re-arm
+#   1   INBOX AUTH             shepherd-inbox 1: 401/403 - report, no re-arm
+#   2   ERROR shepherd-inbox exited <rc>   any other code
+# shepherd-inbox's own stderr lines pass through beneath the verdict. The anchor is
+# `-`: nothing is counted, the child's exit is the whole signal. A replaced or
+# TERMed watcher dies at once; an in-flight curl (20 s max) or poll sleep of
+# its shepherd-inbox child may outlive it by that much, harmlessly.
+#
+# The wake set is ONE predicate (wake_count), read by the anchor and by the
+# loop, so the two can never drift - the failure that killed the T-0090
+# watcher. It counts parsed records, never lines: immune to the unterminated
+# last line (T-0079/80) and needing no `|| echo 0` (T-0090). See adapter R5.
+#
+# Records: $SHEPHERD_ROOT/ledger/watchers/T-NNNN.<kind>, key=value lines,
+# present exactly while that watcher runs (gitignored runtime state, like
+# ledger/locks/). `arm` replaces any live watcher of the task; `rearm` fills
+# gaps, treating a record armed by another Claude session as stale - a
+# watcher from a rolled-over session can exit but wake nobody.
+#
+# Inputs come from the card, never from arguments shepherd could mistype:
+# pane: (stall target), size:/tier: (window ceiling). Session =
+# $CLAUDE_CODE_SESSION_ID (exported into Bash tool subprocesses, observed
+# 2026-09-02), owner = $SHEPHERD_ID.
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_DIR=$(cd -P "$HERE/../lib" && pwd)
+. "$HERE/../lib/shepherd-common.sh"
+
+WATCHERS_DIR="$SHEPHERD_ROOT/ledger/watchers"
+STATUS_DIR="$SHEPHERD_ROOT/ledger/status"
+POLL=${SHEPHERD_WATCH_POLL:-2}
+REPROBE=${SHEPHERD_WATCH_REPROBE:-7}
+REPROBE_INT=$(awk -v r="$REPROBE" 'BEGIN{n=int(r); if(n<r)n++; if(n<1)n=1; print n}')   # whole seconds, rounded UP, never 0
+UPTIME_FILE=${SHEPHERD_WATCH_UPTIME:-/proc/uptime}   # the monotonic clock set_now reads
+SESSION=${CLAUDE_CODE_SESSION_ID:-}
+OWNER=${SHEPHERD_ID:-}
+WINDOW_OVERRIDE=
+TASK= CARD= FILE= PANE= HB=
+PIDS=()
+PARSED=()
+# The inbox child, and its window when --window is not given (wake step 8's
+# 21600: each exit 124 costs a model turn, the loop none). SHEPHERD_INBOX_SCRIPT
+# is a test seam - the probe stubs shepherd-inbox's exit codes - and, like the
+# liveness overrides, it is inert unless hooks_active.
+INBOX_SH="$HERE/shepherd-inbox"
+if hooks_active && [ -n "${SHEPHERD_INBOX_SCRIPT:-}" ]; then INBOX_SH=$SHEPHERD_INBOX_SCRIPT; fi
+INBOX_WINDOW=21600
+
+usage() { printf 'ERROR usage: shepherd-watch arm|rearm|check|list|monitor T-NNNN|inbox\n'; sed -n '5,11p' "$0" >&2; exit 2; }
+die() { printf 'ERROR %s\n' "$*"; exit 2; }
+
+# --- the card -----------------------------------------------------------------
+load_card() {
+  TASK=$1
+  [[ $TASK =~ ^T-[0-9]{4}$ ]] || die "bad task id: $TASK"
+  CARD="$TASKS_DIR/$TASK.md"
+  [ -f "$CARD" ] || die "no card: $CARD"
+  FILE="$STATUS_DIR/$TASK.jsonl"
+  PANE=$(grep -oE '^pane: *[^ ]+' "$CARD" | head -n 1 | awk '{print $2}')
+  local size tier
+  size=$(grep -oE '^size: *[SML]' "$CARD" | head -n 1 | awk '{print $2}')
+  tier=$(grep -oE 'tier: *[a-z]+' "$CARD" | head -n 1 | awk '{print $2}')
+  HB=1800
+  { [ "${size:-}" = L ] || [ "${tier:-}" = heavy ]; } && HB=3600
+  return 0
+}
+
+# --- the inbox target: `inbox` in a task id's place ------------------------------
+# No card; the record is per instance, so the identity is the one input.
+load_inbox() {
+  [ -n "$OWNER" ] || die "SHEPHERD_ID is unset: the inbox record is per instance"
+  valid_shepherd_id "$OWNER" >/dev/null 2>&1 || die "bad SHEPHERD_ID: $OWNER"
+  TASK=inbox CARD= FILE= PANE=none HB=$INBOX_WINDOW
+  return 0
+}
+is_inbox() { [ "$TASK" = inbox ]; }
+# load_target <T-NNNN|inbox> — the card, or the inbox identity
+load_target() {
+  if [ "${1:-}" = inbox ]; then load_inbox; else load_card "${1:-}"; fi
+}
+# target_kinds — the kinds the current target can carry, in record order
+target_kinds() { if is_inbox; then echo inbox; else echo status; echo stall; fi; }
+
+# --- the wake set: ONE predicate, read by the anchor and by the loop -----------
+# status_py <file> <count|newest|describe>
+#   count    → the number of wake-worthy records (0 for a missing file)
+#   newest   → wake | other | empty, for the newest record
+#   describe → the newest wake-worthy record in three words, for the verdict
+status_py() {
+  python3 - "$1" "$2" "$TASK" "$LIB_DIR" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[4])
+from status_wake import wake_worthy, describe, records as read_records
+
+path, op = sys.argv[1], sys.argv[2]
+task = sys.argv[3] if len(sys.argv) > 3 else ""
+records = read_records(path)
+
+if op == "count":
+    print(sum(1 for r in records if wake_worthy(r, task)))
+elif op == "newest":
+    print("empty" if not records else ("wake" if wake_worthy(records[-1], task) else "other"))
+elif op == "describe":
+    hits = [r for r in records if wake_worthy(r, task)]
+    print(describe(hits[-1]).strip() if hits else "unknown")
+PY
+}
+wake_count() { status_py "$1" count; }
+
+# --window overrides BOTH arms, so it is answered before the file is read. HB
+# is the card's tier ceiling only: folding the override into it would let the
+# 900 s floor below silently clamp an explicit --window 3600 - exactly the
+# re-arm monitor issues over an overrunning heavy task, whose newest record is
+# almost always a non-wake checkpoint (spec §3, §4: "--window <s> overrides
+# both").
+pick_window() {
+  [ -n "$WINDOW_OVERRIDE" ] && { echo "$WINDOW_OVERRIDE"; return; }
+  is_inbox && { echo "$HB"; return; }
+  case "$(status_py "$FILE" newest)" in
+    wake|empty) echo "$HB" ;;
+    *) echo 900 ;;
+  esac
+}
+
+# --- records --------------------------------------------------------------------
+# record_path <task> <kind> — T-NNNN.status, T-NNNN.stall, or inbox.<SHEPHERD_ID>:
+# the inbox record is named by the instance, never by a task or the kind.
+record_path() {
+  if [ "$1" = inbox ]; then printf '%s/inbox.%s' "$WATCHERS_DIR" "$OWNER"
+  else printf '%s/%s.%s' "$WATCHERS_DIR" "$1" "$2"; fi
+}
+record_get()  { sed -n "s/^$2=//p" "$1" | head -n 1; }
+# target_records — the record paths of the current target, one per line
+target_records() { local k; for k in $(target_kinds); do record_path "$TASK" "$k"; echo; done; }
+write_record() {  # <kind> <pid> <window> <anchor>
+  mkdir -p "$WATCHERS_DIR"
+  printf 'task=%s\nkind=%s\npid=%s\nppid=%s\narmed_at=%s\nwindow=%s\nanchor=%s\nsession=%s\nowner=%s\npane=%s\nfile=%s\n' \
+    "$TASK" "$1" "$2" "$$" "$(now_iso)" "$3" "$4" "$SESSION" "$OWNER" "${PANE:-none}" "$FILE" \
+    >"$(record_path "$TASK" "$1")"
+}
+pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+is_watch_process() {  # <pid> — true when the pid runs this script
+  [ -n "${1:-}" ] && tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null | grep -q 'shepherd-watch'
+}
+record_state() {  # <record-file> → live | stale | dead
+  local pid sess
+  pid=$(record_get "$1" pid); sess=$(record_get "$1" session)
+  pid_alive "$pid" || { echo dead; return; }
+  if [ -n "$SESSION" ] && [ "$sess" != "$SESSION" ]; then echo stale; else echo live; fi
+}
+# kill_record — stop the watcher a record describes, then remove the record.
+# BOTH pids are checked against is_watch_process first, and the check is not
+# belt-and-braces: ledger/watchers/ survives a reboot, nothing prunes a record
+# orphaned by SIGKILL or a power cut, and PIDs restart low afterwards - so a
+# stale record's pid routinely names some live, unrelated process. Every `arm`
+# and `rearm` passes through here (wake step 8 runs one at every session
+# start), and an unguarded TERM would make that a recurring shot at a stranger.
+# A watcher this script started always answers the check: a status child's
+# /proc/<pid>/cmdline reads `bash …/shepherd-watch arm T-NNNN status …`,
+# because a backgrounded shell function keeps its parent's cmdline (measured
+# 2026-09-02). Anything that does not answer it is not ours to kill; the record
+# is removed either way, which is what makes the stale entry stop coming back.
+kill_record() {  # <record-file> — stop the watcher it describes, remove it
+  local pid ppid
+  pid=$(record_get "$1" pid); ppid=$(record_get "$1" ppid)
+  if [ -n "$pid" ] && is_watch_process "$pid"; then pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; fi
+  if [ -n "$ppid" ] && [ "$ppid" != "$$" ] && is_watch_process "$ppid"; then kill -TERM "$ppid" 2>/dev/null; fi
+  rm -f "$1"
+}
+kill_task_watchers() {  # every record of the target, whatever its state
+  local rec
+  while IFS= read -r rec; do
+    [ -f "$rec" ] && kill_record "$rec"
+  done <<<"$(target_records)"
+  return 0
+}
+remove_own_records() {  # only the records THIS process wrote
+  local rec
+  while IFS= read -r rec; do
+    [ -f "$rec" ] && [ "$(record_get "$rec" ppid)" = "$$" ] && rm -f "$rec"
+  done <<<"$(target_records)"
+  return 0
+}
+cleanup() {
+  local p
+  for p in "${PIDS[@]}"; do
+    [ -n "$p" ] || continue
+    pkill -TERM -P "$p" 2>/dev/null; kill -TERM "$p" 2>/dev/null
+  done
+  remove_own_records
+}
+
+# --- the two watchers -------------------------------------------------------------
+# set_now - whole seconds off a MONOTONIC clock, for every window deadline this
+# script measures itself. (inbox_watch's window is shepherd-inbox's to keep.)
+#
+# `date +%s` is CLOCK_REALTIME, and on this host it is not a duration you can
+# trust: measured 2026-09-08 over one hour on w13:p16, realtime advanced 3519 s
+# while /proc/uptime advanced 3600 s - 81 s of drift, ~2.3 %, in the same
+# direction the registry Gotcha records jumping by hours when WSL2 resyncs
+# after the host sleeps. herdr keeps its own `--timeout` on a monotonic clock
+# and keeps it exactly (same measurement: `--timeout 3600000` returned
+# `timeout` at 3600.0 monotonic seconds), so a window measured in realtime and
+# a herdr wait measured in monotonic seconds are two different windows, which
+# is how a 60 min arm came back at 52-55 (2026-09-02, four panes, twice).
+# Reading the same clock herdr does makes them one window again.
+#
+# /proc/uptime is Linux-only; where it cannot be read, realtime is the honest
+# fallback - the drift is a bug in the window, an unreadable clock is no window
+# at all. That choice is made ONCE, at load, in CLOCK, and never revisited: the
+# two sources differ by six orders of magnitude (~1e4 seconds of uptime against
+# ~1.7e9 of epoch), so a deadline taken on one and compared against the other
+# either fires on its first poll or never fires at all. A clock that answered
+# at load and stops answering later is therefore an error, not a cue to switch
+# - the same call wake_count makes when it cannot count.
+#
+# set_now writes $NOW instead of printing, because a `$(now)` runs in a subshell
+# and could neither remember the choice nor report the failure.
+if u=$(cut -d' ' -f1 "$UPTIME_FILE" 2>/dev/null) && [[ $u =~ ^[0-9]+(\.[0-9]+)?$ ]]
+  then CLOCK=mono; else CLOCK=real; fi
+unset u
+NOW=0
+set_now() {
+  local u
+  [ "$CLOCK" = mono ] || { NOW=$(date +%s); return 0; }
+  u=$(cut -d' ' -f1 "$UPTIME_FILE" 2>/dev/null) || return 1
+  [[ $u =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+  NOW=${u%.*}
+}
+CLOCK_LOST="ERROR the %s clock %s answered at arming and stopped - a watcher that cannot measure its window can only mis-time it, so it stops instead\n"
+
+# status_watch <window> <anchor> → 0 fired, 124 window elapsed, 2 the predicate broke
+status_watch() {
+  local window=$1 anchor=$2 deadline n
+  set_now || { printf "$CLOCK_LOST" "$CLOCK" "$UPTIME_FILE"; return 2; }
+  deadline=$(( NOW + window ))
+  while :; do
+    n=$(wake_count "$FILE")
+    [[ $n =~ ^[0-9]+$ ]] || { printf 'ERROR wake_count produced [%s] - a watcher that cannot count can only time out, so it stops instead\n' "$n"; return 2; }
+    if [ "$n" -gt "$anchor" ]; then
+      printf 'STATUS %s\n' "$(status_py "$FILE" describe)"
+      return 0
+    fi
+    set_now || { printf "$CLOCK_LOST" "$CLOCK" "$UPTIME_FILE"; return 2; }
+    [ "$NOW" -ge "$deadline" ] && { printf 'TIMEOUT %ss\n' "$window"; return 124; }
+    sleep "$POLL"
+  done
+}
+
+# stall_watch <window> → 3 blocked, 5 gone, 124 window elapsed, 7 herdr unusable
+# Runs adapter R5's secondary watcher, verbatim and UNPIPED - a pipe would
+# report the pipe's exit status, not herdr's (T-0093). The verdict is read
+# from the JSON on stderr, never from the exit code alone (adapter R7).
+stall_watch() {
+  local window=$1 deadline remaining errf rc code i prc hpid issued
+  set_now || { printf "$CLOCK_LOST" "$CLOCK" "$UPTIME_FILE" >&2; return 7; }
+  errf=$(mktemp "${TMPDIR:-/tmp}/shepherd-stall.XXXXXX") || { printf 'STALL-UNAVAILABLE mktemp failed\n' >&2; return 7; }
+  # The deadline is taken AFTER mktemp, whose fork is the one slow step here:
+  # taken before it, a second boundary landing in that gap makes the very
+  # first --timeout a second short of the window that was asked for.
+  set_now || { printf "$CLOCK_LOST" "$CLOCK" "$UPTIME_FILE" >&2; return 7; }
+  deadline=$(( NOW + window ))
+  # shellcheck disable=SC2064
+  trap "rm -f '$errf'" EXIT
+  trap "kill \${hpid:-} 2>/dev/null; rm -f '$errf'; exit 143" TERM INT
+  while :; do
+    set_now || { printf "$CLOCK_LOST" "$CLOCK" "$UPTIME_FILE" >&2; return 7; }
+    remaining=$(( deadline - NOW ))
+    [ "$remaining" -gt 0 ] || { printf 'TIMEOUT %ss\n' "$window"; return 124; }
+    issued=$NOW
+    herdr agent wait "$PANE" --until blocked --timeout $((remaining * 1000)) >/dev/null 2>"$errf" &
+    hpid=$!
+    wait "$hpid"; rc=$?
+    hpid=
+    if [ "$rc" -eq 0 ]; then printf 'BLOCKED\n'; return 3; fi
+    # A signal is not a verdict. cleanup()'s FIRST act is `pkill -TERM -P` on
+    # this child, which takes the herdr process alone: `wait` then returns
+    # 128+n with an empty stderr file, `code` parses to empty, and the
+    # catch-all below announced `STALL-UNAVAILABLE herdr:` with no text after a
+    # perfectly normal wake (reproduced deterministically 2026-09-02). Exit the
+    # way this function's own TERM trap does instead - by then run_watchers has
+    # already claimed the winner's verdict and nothing reads this code.
+    [ "$rc" -ge 128 ] && return 143
+    code=$(python3 -c 'import json,sys
+try: print((json.load(open(sys.argv[1])).get("error") or {}).get("code",""))
+except Exception: print("")' "$errf" 2>/dev/null)
+    case "$code" in
+      # herdr's `timeout` is ITS wait ending, which is not the same event as
+      # this window elapsing. 0.8.2 keeps the --timeout it is given, and keeps
+      # it exactly - so with set_now above reading the same clock herdr does,
+      # the two now land together, and this branch is what makes that a
+      # property of the code rather than a coincidence: the deadline at the
+      # loop head is the only thing that ends this window, and a herdr wait
+      # that ends early for any reason is re-issued with what is left. A wait
+      # that came back faster than a re-probe interval is slept off first, so a
+      # herdr answering instantly could not spin here - REPROBE_INT, its
+      # CEILING, because the shell compares whole seconds and flooring a
+      # sub-second REPROBE to 0 would have switched the guard off in exactly
+      # the configuration the tests run under.
+      timeout)
+        # The deadline is checked BEFORE the anti-spin sleep: the last wait of a
+        # window returns at the deadline, and sleeping first would report
+        # TIMEOUT a whole REPROBE late, every window.
+        set_now || { printf "$CLOCK_LOST" "$CLOCK" "$UPTIME_FILE" >&2; return 7; }
+        [ "$NOW" -ge "$deadline" ] && { printf 'TIMEOUT %ss\n' "$window"; return 124; }
+        [ $(( NOW - issued )) -ge "$REPROBE_INT" ] || sleep "$REPROBE"
+        continue ;;
+      agent_not_found)
+        # Transient for a few seconds after launch and on detection hiccups
+        # (shepherd-kelpie, 2026-09-02): believe it only after three probes.
+        prc=1
+        for i in 1 2 3; do
+          pane_probe "$PANE" >/dev/null 2>&1; prc=$?
+          [ "$prc" -ne 1 ] && break
+          [ "$i" -lt 3 ] && sleep "$REPROBE"
+        done
+        case "$prc" in
+          0) sleep "$REPROBE"; continue ;;                 # a session is there: wait again, without spinning
+          1) printf 'GONE %s runs no agent (3 probes)\n' "$PANE"; return 5 ;;
+          *) printf 'STALL-UNAVAILABLE pane_probe unresolved for %s\n' "$PANE" >&2; return 7 ;;
+        esac ;;
+      *) printf 'STALL-UNAVAILABLE herdr: %s\n' "$(tr '\n' ' ' <"$errf" | head -c 200)" >&2; return 7 ;;
+    esac
+  done
+}
+
+# inbox_watch <window> → shepherd-inbox watch's codes mapped (header): 0 WORK 0 ·
+# 124 TIMEOUT 124 · 4 UNREACHABLE 6 · 3 NOT-CONFIGURED 8 · 1 AUTH 1; anything
+# else ERROR 2. The child is backgrounded and waited on, as in stall_watch, so
+# a TERM here takes it along and a signalled exit stays a signal, not a verdict.
+# Its stderr is left alone: the line naming the unreachable Worker or the
+# other instance is the one monitor quotes.
+inbox_watch() {
+  local window=$1 rc cpid
+  bash "$INBOX_SH" watch "$window" & cpid=$!
+  trap 'kill "$cpid" 2>/dev/null; exit 143' TERM INT
+  wait "$cpid"; rc=$?
+  case "$rc" in
+    0)   printf 'INBOX WORK\n'; return 0 ;;
+    124) printf 'INBOX TIMEOUT %ss\n' "$window"; return 124 ;;
+    4)   printf 'INBOX UNREACHABLE\n'; return 6 ;;
+    3)   printf 'INBOX NOT-CONFIGURED\n'; return 8 ;;
+    1)   printf 'INBOX AUTH\n'; return 1 ;;
+  esac
+  [ "$rc" -ge 128 ] && return "$rc"
+  printf 'ERROR shepherd-inbox exited %s\n' "$rc"; return 2
+}
+
+# --- arming -------------------------------------------------------------------------
+stall_armable() {
+  case "${PANE:-}" in ""|none|claiming-*) return 1 ;; *) return 0 ;; esac
+}
+
+# run_watchers <kind>... — arm the kinds, wait for the first verdict, exit with it
+run_watchers() {
+  local kinds=("$@") window anchor kind p q rc kept
+  window=$(pick_window)
+  if is_inbox; then
+    anchor=-   # nothing is counted: the child's exit is the whole signal
+  else
+    anchor=$(wake_count "$FILE")
+    [[ $anchor =~ ^[0-9]+$ ]] || die "wake_count produced [$anchor] at arming time"
+  fi
+  trap cleanup EXIT
+  trap 'cleanup; exit 143' INT TERM HUP
+  for kind in "${kinds[@]}"; do
+    case "$kind" in
+      status)
+        status_watch "$window" "$anchor" & p=$!
+        write_record status "$p" "$window" "$anchor"; PIDS+=("$p") ;;
+      stall)
+        if ! stall_armable; then printf 'STALL-SKIPPED pane is %s\n' "${PANE:-unset}" >&2; continue; fi
+        stall_watch "$window" & p=$!
+        write_record stall "$p" "$window" "$anchor"; PIDS+=("$p") ;;
+      inbox)
+        inbox_watch "$window" & p=$!
+        write_record inbox "$p" "$window" "$anchor"; PIDS+=("$p") ;;
+      *) die "unknown watcher kind: $kind" ;;
+    esac
+  done
+  [ ${#PIDS[@]} -gt 0 ] || die "nothing armable for $TASK"
+  while :; do
+    for p in "${PIDS[@]}"; do
+      pid_alive "$p" && continue
+      wait "$p"; rc=$?
+      if [ "$rc" -eq 7 ]; then
+        # the stall watcher could not run; the status watcher is the primary anyway
+        rm -f "$(record_path "$TASK" stall)"
+        kept=()
+        for q in "${PIDS[@]}"; do [ "$q" = "$p" ] || kept+=("$q"); done
+        PIDS=("${kept[@]}")
+        [ ${#PIDS[@]} -gt 0 ] && continue 2
+        exit 7
+      fi
+      exit "$rc"
+    done
+    sleep 0.5
+  done
+}
+
+# --- verbs ---------------------------------------------------------------------------
+parse_flags() {  # strips --window S from the argument list into WINDOW_OVERRIDE; leaves the rest in PARSED
+  local seen=
+  PARSED=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --window) [ $# -ge 2 ] || die "--window needs seconds"
+                WINDOW_OVERRIDE=$2; seen=1; shift 2 ;;
+      --window=*) WINDOW_OVERRIDE=${1#--window=}; seen=1; shift ;;
+      *) PARSED+=("$1"); shift ;;
+    esac
+  done
+  # Validated here, not at the point of use: an unchecked value reaches
+  # pick_window as the window itself, and a watcher of some length nobody asked
+  # for is worse than a refusal. Every bad spelling is ERROR/exit 2, never the
+  # bash-level exit 1 that ${2:?} and an arithmetic unbound variable produced.
+  if [ -n "$seen" ]; then
+    [[ $WINDOW_OVERRIDE =~ ^[0-9]+$ ]] \
+      || die "--window needs a whole number of seconds, got: [$WINDOW_OVERRIDE]"
+    # …and it is read in base 10, explicitly. Bash arithmetic reads a leading
+    # zero as OCTAL, which broke the invariant three lines up in both
+    # directions: `--window 008` died with the shell's own exit 1 and an empty
+    # stdout ("008: value too great for base"), and `--window 010` watched for
+    # 8 seconds while printing `TIMEOUT 010s`. Normalising once, here, means
+    # every later reader - the deadline arithmetic, the herdr --timeout, the
+    # verdict line and the record's window= field - sees the same seconds.
+    WINDOW_OVERRIDE=$((10#$WINDOW_OVERRIDE))
+  fi
+}
+
+cmd_arm() {
+  local args kinds
+  parse_flags "$@"; args=("${PARSED[@]}")
+  load_target "${args[0]:-}"
+  kinds=("${args[@]:1}")
+  if is_inbox; then
+    [ ${#kinds[@]} -eq 0 ] || die "arm inbox takes no kind: shepherd-inbox watch is its one child"
+    kinds=(inbox)
+  fi
+  [ ${#kinds[@]} -gt 0 ] || kinds=(status stall)
+  kill_task_watchers
+  run_watchers "${kinds[@]}"
+}
+
+cmd_rearm() {
+  local args missing=() kind rec
+  parse_flags "$@"; args=("${PARSED[@]}")
+  load_target "${args[0]:-}"
+  for kind in $(target_kinds); do
+    rec=$(record_path "$TASK" "$kind")
+    if [ -f "$rec" ]; then
+      case "$(record_state "$rec")" in
+        live) continue ;;
+        *) kill_record "$rec" ;;
+      esac
+    fi
+    if [ "$kind" = stall ] && ! stall_armable; then
+      printf 'STALL-SKIPPED pane is %s\n' "${PANE:-unset}" >&2; continue
+    fi
+    missing+=("$kind")
+  done
+  [ ${#missing[@]} -gt 0 ] || { printf 'ARMED-ALREADY %s\n' "$TASK"; exit 4; }
+  run_watchers "${missing[@]}"
+}
+
+cmd_check() {
+  load_target "${1:-}"
+  local kind rec rc=0
+  for kind in $(target_kinds); do
+    rec=$(record_path "$TASK" "$kind")
+    if [ -f "$rec" ] && [ "$(record_state "$rec")" = live ]; then continue; fi
+    if [ "$kind" = stall ] && ! stall_armable; then printf 'stall (unarmable: pane is %s)\n' "${PANE:-unset}"; continue; fi
+    printf '%s\n' "$kind"; rc=1
+  done
+  exit "$rc"
+}
+
+cmd_list() {
+  local rec task kind
+  [ -d "$WATCHERS_DIR" ] || exit 0
+  for rec in "$WATCHERS_DIR"/T-*.status "$WATCHERS_DIR"/T-*.stall "$WATCHERS_DIR"/inbox.*; do
+    [ -f "$rec" ] || continue
+    task=$(record_get "$rec" task); kind=$(record_get "$rec" kind)
+    [ -n "${1:-}" ] && [ "$task" != "$1" ] && continue
+    printf '%s %s %s pid=%s window=%s anchor=%s armed=%s session=%s owner=%s\n' \
+      "$task" "$kind" "$(record_state "$rec")" "$(record_get "$rec" pid)" "$(record_get "$rec" window)" \
+      "$(record_get "$rec" anchor)" "$(record_get "$rec" armed_at)" "$(record_get "$rec" session)" "$(record_get "$rec" owner)"
+  done
+  exit 0
+}
+
+# --- the plugin monitor -----------------------------------------------------
+# `shepherd-watch monitor` is the command behind monitors/monitors.json. Claude
+# Code starts it the first time /shepherd:wake runs in a session and delivers
+# every stdout line to that session as a notification, so a shepherd instance
+# wakes within seconds of a hook write — with no watcher to arm, no count to
+# anchor and no re-arm on any wake. It replaces adapter R5's PRIMARY watcher;
+# the secondary herdr stall watcher stays a per-pane background task.
+#
+# It anchors the current wake-worthy count of every status file, then polls
+# every two seconds and prints one line per NEW wake-worthy record:
+#
+#   T-0214 claim=blocked file=<root>/ledger/status/T-0214.jsonl n=7 ts=<iso>
+#
+# Never `working`, never `idle_prompt`: the wake set is lib/status_wake.py, the
+# same predicate the per-task watcher reads.
+#
+# It does NOT filter by SHEPHERD_ID. Two instances over one checkout each get
+# their own monitor process, both see every claim, and the OWNER FILTER IS THE
+# FIRST ACT OF THE WAKE HANDLER — a card another instance owns is a no-op there.
+# Filtering here was rejected because whether a monitor process inherits the
+# session's environment is not documented: a monitor that filtered on an unset
+# id would print nothing and lose every wake silently, where the handler-side
+# filter fails loud and cheap (T-0218 §6.2).
+cmd_monitor() {
+  local dir="$SHEPHERD_ROOT/ledger/status"
+  exec python3 -u - "$dir" "$LIB_DIR" <<'PY'
+import os, sys, time, datetime
+
+status_dir, lib_dir = sys.argv[1], sys.argv[2]
+sys.path.insert(0, lib_dir)
+from status_wake import wake_worthy, records as read_records
+
+POLL = 2.0
+
+def wake_records(path):
+    return [r for r in read_records(path) if wake_worthy(r, "")]
+
+def status_files():
+    try:
+        return sorted(
+            os.path.join(status_dir, n)
+            for n in os.listdir(status_dir)
+            if n.endswith(".jsonl")
+        )
+    except OSError:
+        return []
+
+def task_of(path, rec):
+    return rec.get("task") or os.path.basename(path).split(".")[0]
+
+def describe_fields(r):
+    claim = r.get("claim")
+    if claim in ("done", "blocked", "failed"):
+        return "claim=%s" % claim
+    out = "event=%s" % r.get("event", "unknown")
+    if r.get("kind"):
+        out += " kind=%s" % r["kind"]
+    return out
+
+# Anchor: everything already on disk is history, not a wake.
+seen = {f: len(wake_records(f)) for f in status_files()}
+
+while True:
+    for f in status_files():
+        hits = wake_records(f)
+        # A file that appeared after the anchor is entirely new.
+        prior = seen.get(f, 0)
+        if len(hits) > prior:
+            for i, r in enumerate(hits[prior:], start=prior + 1):
+                ts = r.get("ts") or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+                print("%s %s file=%s n=%d ts=%s" % (
+                    task_of(f, r), describe_fields(r), f, i, ts))
+            sys.stdout.flush()
+        seen[f] = len(hits)
+    time.sleep(POLL)
+PY
+}
+
+case "${1:-}" in
+  arm)   shift; cmd_arm "$@" ;;
+  rearm) shift; cmd_rearm "$@" ;;
+  check) shift; cmd_check "$@" ;;
+  list)  shift; cmd_list "$@" ;;
+  monitor) shift; cmd_monitor "$@" ;;
+  *) usage ;;
+esac

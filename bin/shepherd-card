@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# Task-card edits under the owner rule, one card per commit. Spec:
+# docs/specs/2026-09-06-procedure-scripts-design.md S1.
+#
+#   shepherd-card get        T-NNNN <field>                                    # value on stdout; owner defaults to shepherd-1; exit 1 when absent
+#   shepherd-card set        T-NNNN <field> <value> [<field> <value>...] [--log "<event>: <detail>"] [--no-commit]
+#   shepherd-card log        T-NNNN "<event>: <detail>" [--orphan] [--no-commit]
+#   shepherd-card transition T-NNNN <state> [--log "<detail>"] [--also <path>]... [--no-commit]
+#
+# Every write re-reads owner: from disk and refuses (REFUSED, exit 1) unless it
+# is $SHEPHERD_ID; an unset or malformed SHEPHERD_ID is ERROR, exit 2, before
+# any file is read - checked by require_id, which every write verb (including
+# `log --orphan`) calls before the card is resolved. `log --orphan` is the one
+# sanctioned write to a card you do not own (CLAUDE.md S4a) and the text must
+# start with `orphan`.
+# Commits go through shepherd-commit, one card per commit, and an edit is
+# either committed or untouched: the card's prior bytes are backed up before
+# the edit and restored (temp-file + rename) if the commit fails, and the
+# paths ledger-commit staged are unstaged again:
+#   transition  "T-NNNN: <from> → <to>"      set  "T-NNNN: <field> <value>[, ...]"      log  "T-NNNN: <text>"
+# A log subject is the whole text when "T-NNNN: <text>" fits SUBJECT_MAX
+# characters, else the text up to its first sentence-ending ". " or its first
+# "; ", whichever comes first - the first sentence or clause, with every colon
+# it carries; a long text with neither break is the subject whole. It was once
+# the text before the first colon, which
+# committed the 2026-09-06 23:57 line on T-0222 as "T-0222: blocked 23"
+# (365389b). 72 is above git-commit(1)'s 50-character guideline (DISCUSSION,
+# read 2026-09-08) because the "T-NNNN: " prefix and `set` subjects already
+# spend it.
+# `--also <path>` adds a path (a glob, expanded under SHEPHERD_ROOT; no match =
+# skipped) to a transition's commit - retro's status JSONL. `--no-commit` is for
+# scripted sequences that commit once at the end (shepherd-preflight), and
+# skips the backup/rollback dance since nothing is committed.
+# Verdict first on stdout: TRANSITION | SET | LOGGED | REFUSED | COMMIT-FAILED | ERROR.
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$HERE/../lib/shepherd-common.sh"
+STATES='captured queued briefed working blocked review done failed abandoned'
+SUBJECT_MAX=72
+TASK= CARD=
+
+usage() { printf 'ERROR usage: shepherd-card get|set|log|transition T-NNNN ...\n'; sed -n '2,/^set -uo pipefail/{/^set -uo pipefail/!p}' "$0" >&2; exit 2; }
+die() { echo "ERROR $*"; exit 2; }
+
+resolve_card() {
+  TASK=$1
+  [[ $TASK =~ ^T-[0-9]{4}$ ]] || die "bad task id: $TASK"
+  CARD="$TASKS_DIR/$TASK.md"
+  [ -f "$CARD" ] || die "no card: $CARD"
+  grep -q '^state:' "$CARD" || die "$TASK is a reservation, not a card (no state: line)"
+}
+
+# require_id — every write verb (get is a read and never calls this) needs a
+# valid $SHEPHERD_ID before anything else, including before the card is
+# resolved: an unset or malformed id must not be shadowed by a "no card"
+# error for a task id that happens not to exist yet.
+require_id() {
+  local me=${SHEPHERD_ID:-}
+  [ -n "$me" ] || die "SHEPHERD_ID is unset - every card write is owner-gated (CLAUDE.md S2 rule 10)"
+  valid_shepherd_id "$me" >/dev/null 2>&1 || die "bad SHEPHERD_ID: $me"
+}
+
+# require_owner — the card must already be resolved and $SHEPHERD_ID already
+# validated by require_id; this only compares the two.
+require_owner() {
+  local me=${SHEPHERD_ID:-} owner
+  owner=$(card_owner "$CARD")
+  if [ "$owner" != "$me" ]; then echo "REFUSED $TASK is owned by $owner, not $me"; exit 1; fi
+}
+
+# edit <ops...> — rewrite the card by temp-file-and-rename. Ops, in order:
+#   --set <field> <value>   --log <line>   (any number, any order)
+edit() {
+  python3 - "$CARD" "$@" <<'PY'
+import os, re, sys, tempfile
+path, args = sys.argv[1], sys.argv[2:]
+with open(path, encoding="utf-8") as fh:
+    lines = fh.read().split("\n")
+hend = 1
+while hend < len(lines) and lines[hend].strip() != "":
+    hend += 1
+
+def set_field(field, value):
+    global hend
+    pat = re.compile(r"(^|   +)" + re.escape(field) + r": *")
+    for i in range(1, hend):
+        m = pat.search(lines[i])
+        if not m:
+            continue
+        rest = lines[i][m.end():]
+        cut = re.search(r"   +", rest) if m.start() == 0 else re.search(r"\s", rest)
+        tail = rest[cut.start():] if cut else ""
+        lines[i] = lines[i][:m.end()] + value + tail
+        return
+    new = f"{field}: {value}"
+    if field == "owner":
+        for i in range(1, hend):
+            if lines[i].startswith("state:"):
+                lines.insert(i + 1, new); hend += 1; return
+    lines.insert(hend, new); hend += 1
+
+def add_log(line):
+    idx = next((i for i, l in enumerate(lines) if l.rstrip() == "## Log"), None)
+    if idx is None:
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        lines.extend(["", "## Log", line, ""])
+        return
+    # The Log ends at the next heading of any level: a ### inside ## Log is not
+    # a Log line, and a scan that only stopped at "## " once filed the new line
+    # under it (T-0221 review).
+    j = idx + 1
+    while j < len(lines) and not re.match(r"#+ ", lines[j]):
+        j += 1
+    k = j
+    while k > idx + 1 and lines[k - 1].strip() == "":
+        k -= 1
+    lines.insert(k, line)
+
+i = 0
+while i < len(args):
+    if args[i] == "--set":
+        set_field(args[i + 1], args[i + 2]); i += 3
+    elif args[i] == "--log":
+        add_log(args[i + 1]); i += 2
+    else:
+        sys.exit(2)
+text = "\n".join(lines)
+if not text.endswith("\n"):
+    text += "\n"
+fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write(text)
+os.replace(tmp, path)
+PY
+}
+
+# backup_card — snapshot $CARD's current bytes to a temp file in the same
+# directory (so the eventual restore is a same-filesystem rename, not a
+# copy) before edit() mutates it. Prints the backup path; returns 1 on
+# failure (a caller in a command substitution can't have this exit the
+# script, so it returns rather than calling die() itself).
+backup_card() {
+  local b
+  b=$(mktemp "$(dirname "$CARD")/.tmp.XXXXXX") || return 1
+  cp -p "$CARD" "$b" || return 1
+  printf '%s\n' "$b"
+}
+
+# finish_write <task> <verdict-line> <commit-msg> <backup-file> <path>... —
+# commits <path...> through shepherd-commit. The verdict is buffered until
+# the commit outcome is known, so a card edit is either committed or
+# untouched (never printed-as-done-but-uncommitted):
+#   success: discards the backup, prints <verdict-line>, returns 0.
+#   failure: restores $CARD from <backup-file> by rename (same atomic
+#     technique as edit()), best-effort unstages <path...> (errors ignored -
+#     shepherd-commit may not have gotten as far as staging them), prints
+#     `COMMIT-FAILED <task> <first line of ledger-commit's error>` as the
+#     only stdout line, and exits 2 - a filesystem/git error, not a refusal.
+finish_write() {
+  local task=$1 verdict=$2 msg=$3 backup=$4; shift 4
+  local out rc first
+  out=$(bash "$HERE/shepherd-commit" "$msg" "$@" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    rm -f "$backup"
+    echo "$verdict"
+    return 0
+  fi
+  mv -f "$backup" "$CARD" 2>/dev/null
+  git -C "$SHEPHERD_ROOT" restore --staged -- "$@" >/dev/null 2>&1 || true
+  first=$(printf '%s\n' "$out" | head -1)
+  echo "COMMIT-FAILED $task $first"
+  exit 2
+}
+
+cmd_get() {
+  resolve_card "$1"
+  local v
+  if [ "$2" = owner ]; then card_owner "$CARD"; return 0; fi
+  v=$(card_field "$CARD" "$2") || return 1
+  printf '%s\n' "$v"
+}
+
+cmd_set() {
+  require_id
+  resolve_card "$1"; shift
+  local ops=() pairs=() logline= commit=1
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --log) logline=${2:-}; [ -n "$logline" ] || usage; shift 2 ;;
+      --no-commit) commit=0; shift ;;
+      --*) usage ;;
+      *) [ $# -ge 2 ] || usage; ops+=(--set "$1" "$2"); pairs+=("$1=$2"); shift 2 ;;
+    esac
+  done
+  [ ${#pairs[@]} -gt 0 ] || usage
+  require_owner
+  [ -n "$logline" ] && ops+=(--log "- $(card_log_time) $logline")
+  local backup=
+  if [ "$commit" -eq 1 ]; then backup=$(backup_card) || die "could not back up $CARD"; fi
+  edit "${ops[@]}" || die "could not write $CARD"
+  if [ "$commit" -eq 1 ]; then
+    local msg="$TASK: $(printf '%s\n' "${pairs[@]}" | sed 's/=/ /' | paste -sd, - | sed 's/,/, /g')"
+    finish_write "$TASK" "SET $TASK ${pairs[*]}" "$msg" "$backup" "ledger/tasks/$TASK.md"
+  else
+    echo "SET $TASK ${pairs[*]}"
+  fi
+}
+
+# sentence_head <text> - the text up to its first SENTENCE-ending ". ", else
+# the text whole. A dot that ends an abbreviation ends no sentence: the word it
+# closes is one or two characters (No., vs.) or carries dots of its own (e.g.,
+# i.e.), and a subject cut there reads as truncation - the defect the whole-text
+# rule exists to avoid.
+sentence_head() {
+  local text=$1 acc= seg word
+  while [ "$text" != "${text#*". "}" ]; do
+    seg=${text%%". "*}
+    text=${text#*". "}
+    acc="$acc$seg"
+    word=${acc##* }
+    case $word in
+      ''|?|??|*.*) ;;
+      *) printf '%s\n' "$acc"; return 0 ;;
+    esac
+    acc="$acc. "
+  done
+  printf '%s\n' "$acc$text"
+}
+
+# log_subject <text> - the commit subject for a Log line (header): the whole
+# text while "T-NNNN: <text>" fits SUBJECT_MAX, else the text before its first
+# sentence-ending ". " or its first "; ", whichever comes first; a text with
+# neither is the subject whole.
+log_subject() {
+  local text=$1 by_dot by_semi head
+  if [ $(( ${#TASK} + 2 + ${#text} )) -le "$SUBJECT_MAX" ]; then printf '%s: %s\n' "$TASK" "$text"; return 0; fi
+  by_dot=$(sentence_head "$text"); by_semi=${text%%"; "*}
+  if [ ${#by_dot} -le ${#by_semi} ]; then head=$by_dot; else head=$by_semi; fi
+  printf '%s: %s\n' "$TASK" "$head"
+}
+
+cmd_log() {
+  require_id
+  resolve_card "$1"; shift
+  local text=${1:-} orphan=0 commit=1; shift || true
+  [ -n "$text" ] || usage
+  while [ $# -gt 0 ]; do
+    case $1 in --orphan) orphan=1 ;; --no-commit) commit=0 ;; *) usage ;; esac; shift
+  done
+  if [ "$orphan" -eq 1 ]; then
+    case $text in orphan:*) ;; *) die "--orphan is only for a Log line that starts with 'orphan' (CLAUDE.md S4a)" ;; esac
+  else
+    require_owner
+  fi
+  local line="- $(card_log_time) $text"
+  local backup=
+  if [ "$commit" -eq 1 ]; then backup=$(backup_card) || die "could not back up $CARD"; fi
+  edit --log "$line" || die "could not write $CARD"
+  if [ "$commit" -eq 1 ]; then
+    finish_write "$TASK" "LOGGED $TASK $line" "$(log_subject "$text")" "$backup" "ledger/tasks/$TASK.md"
+  else
+    echo "LOGGED $TASK $line"
+  fi
+}
+
+cmd_transition() {
+  require_id
+  resolve_card "$1"; shift
+  local to=${1:-}; shift || true
+  local detail= also=() commit=1 from line paths p backup=
+  case " $STATES " in *" $to "*) ;; *) die "unknown state: '$to' (want one of: $STATES)" ;; esac
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --log) [ $# -ge 2 ] || usage; detail=$2; shift 2 ;;
+      --also) [ $# -ge 2 ] || usage; also+=("$2"); shift 2 ;;
+      --no-commit) commit=0; shift ;;
+      *) usage ;;
+    esac
+  done
+  require_owner
+  from=$(card_field "$CARD" state)
+  [ "$from" != "$to" ] || { echo "REFUSED $TASK is already $to"; exit 1; }
+  line="- $(card_log_time) $from → $to${detail:+ ($detail)}"
+  if [ "$commit" -eq 1 ]; then backup=$(backup_card) || die "could not back up $CARD"; fi
+  edit --set state "$to" --log "$line" || die "could not write $CARD"
+  if [ "$commit" -eq 1 ]; then
+    paths=("ledger/tasks/$TASK.md")
+    for p in "${also[@]}"; do
+      while IFS= read -r m; do [ -n "$m" ] && paths+=("$m"); done < <(cd "$SHEPHERD_ROOT" && compgen -G "$p")
+    done
+    finish_write "$TASK" "TRANSITION $TASK $from → $to" "$TASK: $from → $to" "$backup" "${paths[@]}"
+  else
+    echo "TRANSITION $TASK $from → $to"
+  fi
+}
+
+case ${1:-} in
+  get)        shift; [ $# -eq 2 ] || usage; cmd_get "$@" ;;
+  set)        shift; [ $# -ge 3 ] || usage; cmd_set "$@" ;;
+  log)        shift; [ $# -ge 2 ] || usage; cmd_log "$@" ;;
+  transition) shift; [ $# -ge 2 ] || usage; cmd_transition "$@" ;;
+  *) usage ;;
+esac

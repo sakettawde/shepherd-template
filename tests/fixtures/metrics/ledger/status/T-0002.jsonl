@@ -1,0 +1,2 @@
+{"ts": "2026-09-01T11:10:00+0000", "event": "stop", "task": "T-0002", "session_id": "s2", "claim": "blocked", "tail": "SHEPHERD: blocked — design approval needed for the plan"}
+{"ts": "2026-09-01T11:11:00+0000", "event": "notification", "task": "T-0002", "kind": "idle_prompt", "message": "Claude is waiting for your input"}

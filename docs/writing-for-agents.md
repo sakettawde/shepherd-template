@@ -58,3 +58,13 @@ a restated sentence every time. Hunt for passages begging to collapse into one w
 - **Watch for sediment** — stale layers settle because adding feels safe and removing
   feels risky. Retro's prune-while-banking rule is this discipline for gotchas;
   apply the same pass to skills and working agreements.
+
+## Counting
+
+A size target, a ceiling or a before/after report names its counting method beside the
+number, because two honest counts of one file disagree: T-0234's Brief baselines missed `wc -w`
+in both directions — five of its seven skills low, two high — and the worker had to re-derive
+its targets. House methods — words: `wc -w < <file>`,
+whitespace-separated, so a fenced block or a table counts like prose; tokens: ceil(bytes / 4),
+the approximation `${CLAUDE_PLUGIN_ROOT}/lib/metrics.py` uses for the always-loaded set. The per-skill
+ceilings in `${CLAUDE_PLUGIN_ROOT}/tests/test-skill-ceilings.sh` are `wc -w` words.

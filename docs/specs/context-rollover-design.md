@@ -3,7 +3,7 @@
 > **Renamed 2026-08-27 (T-0185).** This document, the script it specifies and their
 > vocabulary were called *self-recycle* until then; the old names read to Claude Code's
 > permission auto-classifier as a destructive action and got the command refused. The
-> script is now `scripts/context-rollover.sh`, its verb is `rollover`, its log is
+> script is now `shepherd-rollover`, its verb is `rollover`, its log is
 > `${SHEPHERD_ROLLOVER_LOG:-~/.claude/shepherd-rollover.log}`, and `decide` answers
 > `rollover|hold|ok|unknown`. Behaviour did not change. Names from before the rename are
 > kept below only where they record what was actually observed — the `/tmp` log path in
@@ -20,7 +20,7 @@ detection manifest `remote/claude.toml` version `2026.08.21.1`.
 
 ## 1. The incident
 
-On 2026-08-25 `shepherd-collie` recycled at 19:04:28. `scripts/context-rollover.sh decide`
+On 2026-08-25 `shepherd-collie` recycled at 19:04:28. `shepherd-rollover decide`
 correctly returned `recycle` (200k tokens, no active card). The detached injector was
 armed with a 30 s delay, `/clear` was queued, and the new session transcript starts at
 19:04:35 — so **the clear itself worked**. The injector then polled for up to
@@ -181,10 +181,10 @@ empty log file was indistinguishable between "died at once" and "polled for six 
 
 ## 6. The design
 
-`scripts/context-rollover.sh` keeps `ctx`, `decide` and `meter` unchanged — they were correct in
+`shepherd-rollover` keeps `ctx`, `decide` and `meter` unchanged — they were correct in
 this incident and are out of scope. `inject` is replaced by two subcommands.
 
-**`context-rollover.sh rollover [--sound S] [--pane P] [--log F] <message>`** — run by shepherd in
+**`shepherd-rollover rollover [--sound S] [--pane P] [--log F] <message>`** — run by shepherd in
 one turn, in place of steps 2–4 of the old R10:
 
 1. Resolve the pane's current session id `S0` via `pane_probe`. No id → abort loudly (the herdr
@@ -193,12 +193,12 @@ one turn, in place of steps 2–4 of the old R10:
    answered into it.
 3. Force prompt mode: `send-keys Escape`, re-read the prompt box, require a bare `❯`. Refuse
    if the box will not come clean.
-4. Arm the detached watchdog (`context-rollover.sh watch`), passing `S0`.
+4. Arm the detached watchdog (`shepherd-rollover watch`), passing `S0`.
 5. Submit `/clear` via `herdr agent prompt`.
 
 Shepherd then ends its turn, exactly as before.
 
-**`context-rollover.sh watch <pane> <old-session-id> <message>`** — the detached watchdog, and a
+**`shepherd-rollover watch <pane> <old-session-id> <message>`** — the detached watchdog, and a
 first-class subcommand so that it is directly testable:
 
 - **Phase 1, confirm the clear.** Poll `pane_probe` every `POLL` s (default 2) up to
@@ -237,7 +237,7 @@ Confidence: **high** for the root cause and for the session-id gate — both are
 including the reproduction of the exact failure. **Medium-high** for the transcript verification,
 whose only assumption is that Claude Code keeps writing session transcripts to
 `~/.claude/projects/*/<session-id>.jsonl`; that layout is observed on this machine and is what
-`context-rollover.sh meter` has already depended on.
+`shepherd-rollover meter` has already depended on.
 
 ## 7. Live validation
 
@@ -294,7 +294,7 @@ loudly, which is exactly what that gate is for.
 
 ## 8. Validation: what interrupts the rollover (T-0187, 2026-08-27)
 
-**Verdict: the rollover interrupted its own tool call.** In `scripts/context-rollover.sh`
+**Verdict: the rollover interrupted its own tool call.** In `shepherd-rollover`
 as of `ad7c581`, line 161 (`prompt_mode_ok`) ran `herdr pane send-keys <pane> Escape` against the
 shepherd's **own** pane, from the **foreground**, while that foreground was still
 running as the shepherd's Bash tool call. Claude Code reads an Escape into its pane as
@@ -322,7 +322,7 @@ new for a foreground that never finished. `test-rollover.sh` asserts the invaria
 behaviourally and structurally: the `rollover` branch of the script contains no
 `send-keys` and no `agent prompt` call at all.
 
-The `wake` skill and the one-word `/wake` message shipped alongside this finding are
+The `wake` skill and the one-word `/shepherd:wake` message shipped alongside this finding are
 **simplifications, not the fix** — the command was never blocked for what it said.
 
 **Standing risk, named.** Auto mode does block *"sending keystrokes to Claude Code's own

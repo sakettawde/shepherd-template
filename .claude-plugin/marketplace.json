@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "shepherd-plugins",
+  "description": "The shepherd orchestration framework, published as a single plugin from its own repository.",
+  "owner": {
+    "name": "Saket Tawde",
+    "url": "https://github.com/sakettawde"
+  },
+  "plugins": [
+    {
+      "name": "shepherd",
+      "source": "./",
+      "description": "A thin orchestrator for Claude Code: route, dispatch, verify, remember.",
+      "version": "1.0.0",
+      "category": "workflow",
+      "keywords": ["orchestration", "agents", "herdr", "workflow", "ledger"]
+    }
+  ]
+}

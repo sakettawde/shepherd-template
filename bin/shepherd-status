@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# shepherd-status <done|blocked|failed|working> "<one-liner>"
+#
+# The worker's status command. Appends the claim straight to the task's status
+# file ($SHEPHERD_STATUS_FILE, the ground truth shepherd's watcher reads), so a
+# claim no longer depends on a regex matching prose. Reached through PATH: the
+# worker launch line (adapter R3) prepends this directory. The SHEPHERD:
+# sentinel line stays as the fallback, and every failure here says so.
+#
+# No hard-coded root, on purpose: the plugin packaging (T-0218) ships bin/
+# scripts that self-locate from $0, and this one needs nothing but its two
+# env vars. Exit 0 recorded; 1 could not record (reason on stderr); 2 usage.
+set -u
+
+usage() {
+  printf 'usage: shepherd-status done|blocked|failed|working "<one short line>"\n' >&2
+  exit 2
+}
+fallback() {  # <why> - the worker sees this and writes the sentinel line instead
+  printf 'shepherd-status: %s. Report with the sentinel line instead: SHEPHERD: <claim> - <one-liner>\n' "$1" >&2
+  exit 1
+}
+
+claim=${1:-}
+[ $# -ge 1 ] && shift
+case "$claim" in done|blocked|failed|working) ;; *) usage ;; esac
+message=$*
+[ -n "$message" ] || usage
+
+[ -n "${SHEPHERD_TASK_ID:-}" ] && [ -n "${SHEPHERD_STATUS_FILE:-}" ] \
+  || fallback "SHEPHERD_TASK_ID and SHEPHERD_STATUS_FILE are not set (not a shepherd worker session?)"
+
+# The two variables must describe the SAME task. A partial override - one set,
+# the other inherited from the surrounding session - is how a claim for one
+# task lands in another task's ground-truth file and wakes the wrong shepherd
+# (measured 2026-09-02: `task: T-TEST` written into T-0214.jsonl). The file
+# name is the task's own, so comparing it is the whole check.
+[ "${SHEPHERD_STATUS_FILE##*/}" = "$SHEPHERD_TASK_ID.jsonl" ] \
+  || fallback "SHEPHERD_STATUS_FILE is $SHEPHERD_STATUS_FILE, which is not $SHEPHERD_TASK_ID's file (expected a basename of $SHEPHERD_TASK_ID.jsonl) - refusing to claim for one task in another task's file"
+
+command -v python3 >/dev/null 2>&1 || fallback "python3 not found"
+
+err=$(python3 - "$claim" "$message" 2>&1 <<'PY'
+import json, os, sys, time
+claim, message = sys.argv[1], sys.argv[2][:200]
+line = {
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "event": "claim",
+    "task": os.environ["SHEPHERD_TASK_ID"],
+    "kind": "command",
+    "claim": claim,
+    "message": message,
+    "session_id": os.environ.get("CLAUDE_CODE_SESSION_ID"),
+}
+try:
+    with open(os.environ["SHEPHERD_STATUS_FILE"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+except Exception as exc:
+    sys.stderr.write("cannot write %s: %s" % (os.environ["SHEPHERD_STATUS_FILE"], exc))
+    sys.exit(1)
+PY
+) || fallback "${err:-could not record}"
+
+printf 'recorded %s for %s\n' "$claim" "$SHEPHERD_TASK_ID"

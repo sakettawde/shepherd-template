@@ -1,60 +1,36 @@
 #!/bin/sh
-# shepherd worker Stop hook — appends a ground-truth event line to the task's status file.
-# Registered user-globally in ~/.claude/settings.json; exits instantly for any session
-# that does not carry shepherd's env vars, so manual Claude sessions are unaffected.
+# shepherd worker Stop hook — appends the turn's claim record to the task's
+# status file (ground truth, CLAUDE.md §2 rule 1). Registered user-globally in
+# ~/.claude/settings.json; exits instantly for any session that does not carry
+# shepherd's env vars, so manual Claude sessions are unaffected.
+#
+# The record is written by lib/worker_stop.py: the SHEPHERD: sentinel on its
+# own line (however decorated), the transcript as a fallback when the payload
+# carries no message, and a claim written by shepherd-status this
+# turn inherited when the message carries no sentinel. A failure to record is
+# itself recorded (lib/run-hook.sh). Exit 0 always: exit 2 would block the stop.
 [ -n "${SHEPHERD_TASK_ID:-}" ] || exit 0
 [ -n "${SHEPHERD_STATUS_FILE:-}" ] || exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
+HERE=$(cd "$(dirname "$0")" && pwd)
 
-# Spool the hook JSON from stdin to a file: `python3 -` reads the *program* from
-# stdin, so the payload must travel via file instead (same pattern as herdr's hook).
-hook_input="$(mktemp "${TMPDIR:-/tmp}/shepherd-stop.XXXXXX")" || exit 0
-trap 'rm -f "$hook_input"' EXIT HUP INT TERM
-cat >"$hook_input" 2>/dev/null || true
+# `.` on an unreadable file aborts a POSIX shell outright - dash exits 2, and
+# exit 2 from THIS hook blocks the worker's turn. So the missing library is
+# reported the only way still available - a hand-built record, no helpers, with
+# the same status-file-then-sidecar ladder shepherd_status.hook_error uses -
+# and the hook exits 0 like every other path here.
+if [ -r "$HERE/lib/run-hook.sh" ]; then
+  . "$HERE/lib/run-hook.sh"
+else
+  now=$(date +%Y-%m-%dT%H:%M:%S%z)
+  msg="hooks/lib/run-hook.sh is missing; nothing recorded"
+  # The library's pair check, made here by hand: a task id that is not this
+  # file's own writes nothing into it, on this path as on every other (T-0223).
+  [ "${SHEPHERD_STATUS_FILE##*/}" = "$SHEPHERD_TASK_ID.jsonl" ] || { printf '%s stop SHEPHERD_TASK_ID %s is not the task of %s (expected basename %s.jsonl); %s\n' "$now" "$SHEPHERD_TASK_ID" "$SHEPHERD_STATUS_FILE" "$SHEPHERD_TASK_ID" "$msg" >>"$SHEPHERD_STATUS_FILE.err" 2>/dev/null; exit 0; }
+  printf '{"ts": "%s", "event": "hook_error", "task": "%s", "kind": "stop", "message": "%s"}\n' \
+    "$now" "$SHEPHERD_TASK_ID" "$msg" >>"$SHEPHERD_STATUS_FILE" 2>/dev/null \
+    || printf '%s stop %s\n' "$now" "$msg" >>"$SHEPHERD_STATUS_FILE.err" 2>/dev/null
+  exit 0
+fi
 
-SHEPHERD_HOOK_INPUT="$hook_input" python3 - <<'PY' 2>/dev/null || true
-import json, os, re, time
-
-data = {}
-try:
-    with open(os.environ["SHEPHERD_HOOK_INPUT"], encoding="utf-8") as fh:
-        content = fh.read()
-    if content.strip():
-        data = json.loads(content)
-except Exception:
-    data = {}
-
-# Subagent completions must never speak for the worker itself.
-if data.get("agent_id") or data.get("hook_event_name") == "SubagentStop":
-    raise SystemExit(0)
-
-msg = data.get("last_assistant_message") or ""
-# The sentinel is a LINE, and only the last one counts. Matching anywhere in
-# the message records a claim from a worker that merely wrote *about* one
-# (T-0093: a turn discussing a failed card was recorded "claim": "failed"
-# while its own tail ended `SHEPHERD: working`). `working` is admitted as a
-# non-terminal progress checkpoint - the R5 watcher greps only for
-# done|blocked|failed, so it never wakes shepherd.
-# Markdown decoration between the line start and the sentinel is skipped:
-# workers copy the line out of the card and emphasise it, and a backticked
-# `SHEPHERD: blocked` used to record "claim": "none" - so the watcher never
-# fired and the blocked worker waited for the heartbeat instead (T-0213).
-# The horizontal-whitespace classes matter: \s would let the anchor step over
-# a newline and match a claim word sitting on the following line.
-claims = re.findall(r"(?m)^[ \t]*[`*_]{0,4}SHEPHERD:[ \t]*(done|blocked|failed|working)\b", msg)
-
-line = {
-    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    "event": "stop",
-    "task": os.environ.get("SHEPHERD_TASK_ID"),
-    "session_id": data.get("session_id"),
-    "transcript_path": data.get("transcript_path"),
-    "stop_reason": data.get("stop_reason"),
-    "permission_mode": data.get("permission_mode"),
-    "claim": claims[-1] if claims else "none",
-    "tail": msg[-400:],
-}
-with open(os.environ["SHEPHERD_STATUS_FILE"], "a", encoding="utf-8") as f:
-    f.write(json.dumps(line, ensure_ascii=False) + "\n")
-PY
+shepherd_hook_run stop "$HERE/lib/worker_stop.py"
 exit 0

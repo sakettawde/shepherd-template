@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Installs shepherd's status line — the context meter `shepherd-rollover decide` reads
+# (CLAUDE.md §8, adapter R10).
+#
+# Usage:
+#   shepherd-statusline           copy lib/statusline.py to $HOME/.claude/statusline.py
+#                                   when absent or different, set its exec bit, and merge
+#                                     "statusLine": {"type": "command", "command": "python3 $HOME/.claude/statusline.py"}
+#                                   into $HOME/.claude/settings.json, keeping every other key
+#                                   (an existing padding/refreshInterval survives).
+#                                   Prints one line:
+#                                     statusline: file=<installed|updated|unchanged> settings=<registered|unchanged> -> <path>
+#   shepherd-statusline --check   same verdicts, nothing written; exit 1 when anything
+#                                   would change. `shepherd-rollover decide --self-test`
+#                                   runs this form; the verdict words say what a run WOULD do.
+#
+# Idempotent and diff-aware: a second run reports unchanged on both halves. A displaced copy
+# that differed is kept once as statusline.py.prev, so an operator's local edit is not lost
+# silently. $HOME is honoured throughout so a test can point it at a temp HOME — and every
+# test MUST point HOME at a temporary directory, because run against the real HOME this
+# script rewrites the operator's live configuration mid-session.
+#
+# Contract (https://code.claude.com/docs/en/statusline, read 2026-09-02): the status line is
+# registered as `"statusLine": {"type": "command", "command": "<cmd>"}` in user settings and
+# the command receives the session JSON on stdin — model.display_name, effort.level,
+# context_window.context_window_size (200000, or 1000000 for extended-context models) and
+# context_window.used_percentage, which "may be null early in the session". Claude Code
+# re-runs the status line when its `command` changes, so a registration takes effect at once.
+# Called by init-shepherd's install step; run again after pulling a change to statusline.py.
+set -euo pipefail
+
+here=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+SRC="$here/lib/statusline.py"
+DST="$HOME/.claude/statusline.py"
+SETTINGS="$HOME/.claude/settings.json"
+CMD="python3 $DST"
+check=0
+case "${1:-}" in
+  --check) check=1 ;;
+  "") ;;
+  *) echo "install-statusline: unknown argument $1 (usage: shepherd-statusline [--check])" >&2; exit 2 ;;
+esac
+
+[ -f "$SRC" ] || { echo "install-statusline: missing $SRC" >&2; exit 2; }
+
+if [ ! -f "$DST" ]; then file=installed
+elif ! cmp -s "$SRC" "$DST"; then file=updated
+else file=unchanged; fi
+
+# The settings half: python3 reads, compares, and — unless --check — writes the merge.
+settings=$(SL_SETTINGS="$SETTINGS" SL_CMD="$CMD" SL_CHECK="$check" python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["SL_SETTINGS"])
+t = p.read_text() if p.exists() else ""
+s = json.loads(t) if t.strip() else {}
+cur = s.get("statusLine")
+want = os.environ["SL_CMD"]
+if isinstance(cur, dict) and cur.get("type") == "command" and cur.get("command") == want:
+    print("unchanged"); raise SystemExit(0)
+if os.environ["SL_CHECK"] == "1":
+    print("registered"); raise SystemExit(0)
+sl = cur if isinstance(cur, dict) else {}
+sl["type"] = "command"
+sl["command"] = want
+s["statusLine"] = sl
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(s, indent=2) + "\n")
+print("registered")
+PY
+)
+
+if [ "$check" -eq 0 ] && [ "$file" != unchanged ]; then
+  mkdir -p "$(dirname "$DST")"
+  if [ "$file" = updated ]; then cp -p "$DST" "$DST.prev"; fi
+  cp "$SRC" "$DST"
+  chmod +x "$DST"
+fi
+
+printf 'statusline: file=%s settings=%s -> %s\n' "$file" "$settings" "$DST"
+if [ "$check" -eq 1 ]; then
+  [ "$file" = unchanged ] && [ "$settings" = unchanged ]
+fi

@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# shepherd-reply <file>|-
+#
+# The reply worker's one delivery (docs/specs/2026-09-07-linear-conversation-design.md
+# §2 Delivery). Replaces the `## Reply` section of the task's own card with the
+# text given (a file, or stdin as `-`), appends an `event: reply` record to the
+# task's status file, and commits nothing: shepherd commits the card when it
+# verifies the reply. Mirrors shepherd-status: reached through PATH from the
+# launch line (adapter R3), needs only the two env vars, and refuses a status
+# file whose basename is another task's - the partial-override trap of
+# 2026-09-02 would otherwise deliver one task's reply into another task's card.
+# The card path is derived from the status file's directory
+# (ledger/status/T-NNNN.jsonl -> ledger/tasks/T-NNNN.md), so no root is
+# hard-coded (plugin packaging, T-0218).
+#
+# The shape is checked before anything is written: the four labels, each at
+# the start of a line, in this order - **Answer**, **What I checked**,
+# **Confidence**, **Next step** - because the ladder that verifies a reply and
+# the close-out that posts it read those four parts, and a missing one costs a
+# wake either way (ruling, 2026-09-07). Past 150 words it warns and still
+# records; the count rides the record as `words`.
+#
+# Exit 0 recorded; 1 refused (reason on stderr, nothing written); 2 usage.
+set -u
+
+usage() {
+  printf 'usage: shepherd-reply <file>|-   (the reply: **Answer**, **What I checked**, **Confidence**, **Next step**, each starting a line, in that order)\n' >&2
+  exit 2
+}
+refuse() { printf 'shepherd-reply: %s\n' "$1" >&2; exit 1; }
+
+[ $# -eq 1 ] || usage
+src=$1
+
+[ -n "${SHEPHERD_TASK_ID:-}" ] && [ -n "${SHEPHERD_STATUS_FILE:-}" ] \
+  || refuse "SHEPHERD_TASK_ID and SHEPHERD_STATUS_FILE are not set (not a shepherd worker session?)"
+[ "${SHEPHERD_STATUS_FILE##*/}" = "$SHEPHERD_TASK_ID.jsonl" ] \
+  || refuse "SHEPHERD_STATUS_FILE is $SHEPHERD_STATUS_FILE, which is not $SHEPHERD_TASK_ID's file (expected a basename of $SHEPHERD_TASK_ID.jsonl) - refusing to deliver one task's reply through another task's file"
+card="$(dirname "$SHEPHERD_STATUS_FILE")/../tasks/$SHEPHERD_TASK_ID.md"
+[ -f "$card" ] || refuse "no card at $card (ledger/tasks/$SHEPHERD_TASK_ID.md, derived from SHEPHERD_STATUS_FILE)"
+command -v python3 >/dev/null 2>&1 || refuse "python3 not found"
+
+if [ "$src" = - ]; then
+  text=$(cat)
+else
+  [ -f "$src" ] || refuse "no such file: $src"
+  text=$(cat "$src")
+fi
+
+# The program is a variable, not a heredoc on the same command as the text:
+# two stdin redirections cannot both land, and the text is the one that must.
+prog=$(cat <<'PY'
+import json, os, re, sys, tempfile, time
+card, task, status = sys.argv[1], sys.argv[2], sys.argv[3]
+text = sys.stdin.read().rstrip("\n")
+
+def refuse(msg):
+    sys.stderr.write("shepherd-reply: %s\n" % msg)
+    sys.exit(1)
+
+LABELS = ["**Answer**", "**What I checked**", "**Confidence**", "**Next step**"]
+if not text.strip():
+    refuse("the reply is empty")
+positions = []
+for label in LABELS:
+    m = re.search(r"(?m)^[ \t]*(?:[-*]|\d+\.)?[ \t]*" + re.escape(label), text)
+    if not m:
+        refuse("the reply has no line starting with %s; the four labels, in order, are %s" % (label, ", ".join(LABELS)))
+    positions.append(m.start())
+if positions != sorted(positions):
+    refuse("the four labels are out of order; they go %s" % ", ".join(LABELS))
+# The section is H2-delimited: an `## ` line inside the reply would end it
+# early for every later reader (a re-delivery, retro's post) and strand the
+# rest on the card.
+if re.search(r"(?m)^## ", text):
+    refuse("the reply has a line starting with `## `; the ## Reply section cannot hold an H2 - use bold or ### instead")
+words = sum(1 for t in text.split() if re.search(r"[A-Za-z0-9]", t))
+
+with open(card, encoding="utf-8") as fh:
+    lines = fh.read().split("\n")
+idx = next((i for i, l in enumerate(lines) if l.rstrip() == "## Reply"), None)
+section = ["## Reply", text, ""]
+if idx is None:
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    lines += [""] + section
+else:
+    j = idx + 1
+    while j < len(lines) and not lines[j].startswith("## "):
+        j += 1
+    lines[idx:j] = section
+fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=os.path.dirname(card) or ".")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    os.chmod(tmp, os.stat(card).st_mode & 0o7777)   # mkstemp is 0600; keep the card's mode
+    os.replace(tmp, card)
+except Exception as exc:
+    try: os.unlink(tmp)
+    except OSError: pass
+    refuse("cannot write %s: %s" % (card, exc))
+
+record = {
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "event": "reply",
+    "task": task,
+    "kind": "command",
+    "words": words,
+    "session_id": os.environ.get("CLAUDE_CODE_SESSION_ID"),
+}
+try:
+    with open(status, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+except Exception as exc:
+    refuse("the card was written but the status record was not - cannot write %s: %s" % (status, exc))
+if words > 150:
+    sys.stderr.write("shepherd-reply: %d words; the whole reply is meant to fit in 150 - trim before shepherd posts it\n" % words)
+print(words)
+PY
+)
+words=$(printf '%s' "$text" | python3 -c "$prog" "$card" "$SHEPHERD_TASK_ID" "$SHEPHERD_STATUS_FILE") || exit $?
+
+printf 'recorded reply for %s (%s words)\n' "$SHEPHERD_TASK_ID" "$words"

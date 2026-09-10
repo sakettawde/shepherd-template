@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# shepherd-card-tokens — what a card cost, in tokens, read from its worker transcripts.
+# Read-only; never writes. Feeds retro step 1's `tokens` field (F-24 of
+# docs/reports/2026-09-07-prompt-audit.md).
+#
+#   shepherd-card-tokens T-NNNN [T-NNNN ...]      a block per card, then the paste-ready
+#                                           `tokens <in>/<out> <model>` fragment
+#   shepherd-card-tokens --json T-NNNN [...]      one JSON object on stdout instead
+#
+# Exit 0 when every named card produced a figure, 1 when any did not (the block
+# says which), 2 on a usage error.
+#
+# Where the numbers come from. The Stop hook records `transcript_path` on every
+# `stop` event (adapter R7), so a card's status files — `T-NNNN.jsonl` and the
+# rotated `T-NNNN.<suffix>.jsonl` — name every transcript the card ran through,
+# a relaunch or a handoff included. Each transcript is JSONL; an `assistant`
+# entry carries `message.usage` with the turn's billed counts.
+#
+# DEDUPE BY `message.id` IS THE CORRECTNESS OF THIS SCRIPT. A transcript writes
+# one line per content block of the same assistant message, each repeating that
+# message's usage verbatim: T-0245's transcript holds 134 usage entries for 49
+# distinct message ids, and summing the entries reports 34.8M input where the
+# truth is 13.3M — an overcount of about 2.6x. The first entry for an id counts
+# and the rest are dropped; an entry with no id falls back to `requestId`, then
+# to the line's own `uuid`, so a shape without ids is over- rather than
+# under-counted and never silently merged.
+#
+# `input` is everything billed as input — fresh (`input_tokens`), cache writes
+# (`cache_creation_input_tokens`) and cache reads (`cache_read_input_tokens`) —
+# because a tier comparison that drops cache reads compares the wrong thing.
+# The three are also reported separately, since they are not priced alike. No
+# dollar figure: prices are a third party's and would fossilise here.
+#
+# SUBAGENTS ARE IN THE FIGURE, and finding them takes a second look. A
+# subagent's turns are NOT in the parent transcript: Claude Code writes each one
+# to its own file beside it, at `<transcript without .jsonl>/subagents/*.jsonl`,
+# with every assistant entry marked `isSidechain` and carrying its own usage
+# (1,109 of 1,430 transcript files on this machine have such a directory,
+# 2026-09-08). Reading only the path the Stop hook records would therefore
+# report a delegating card at its orchestrator's cost alone. Every sibling
+# subagent file is read too, and their share is named beside the turn count.
+#
+# A `<synthetic>` entry is not a turn at all: it is the harness's own notice (an
+# API error, a cancellation) carrying an all-zero usage block, and counting it
+# would put `<synthetic>` in the model name.
+#
+# Nothing is guessed. A card with no status file, no recorded transcript, or a
+# transcript that is no longer on disk says so and reports `tokens none`;
+# unreadable JSONL lines are counted, not skipped silently.
+set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/shepherd-common.sh"
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+
+json=0; ids=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    --json) json=1 ;;
+    T-*) ids+=("$1") ;;
+    *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+[ ${#ids[@]} -gt 0 ] || { usage >&2; exit 2; }
+command -v python3 >/dev/null || { echo "ERROR: python3 is required" >&2; exit 2; }
+
+exec python3 - "$SHEPHERD_ROOT/ledger/status" "$json" "${ids[@]}" <<'PY'
+import json as J, os, re, sys
+
+status_dir, want_json, ids = sys.argv[1], sys.argv[2] == "1", sys.argv[3:]
+ID = re.compile(r"^T-[0-9]+$")
+
+
+def compact(n):
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return "%.1fk" % (n / 1000.0)
+    return "%.1fM" % (n / 1_000_000.0)
+
+
+def status_files(tid):
+    """The card's own status file and its rotated siblings, sorted."""
+    out = []
+    for name in sorted(os.listdir(status_dir)) if os.path.isdir(status_dir) else []:
+        if name == tid + ".jsonl" or (name.startswith(tid + ".") and name.endswith(".jsonl")):
+            out.append(os.path.join(status_dir, name))
+    return out
+
+
+def subagent_files(path):
+    """The subagent transcripts written beside `path`, sorted; [] when none.
+
+    Claude Code puts them in a directory named after the session — the
+    transcript's own name without `.jsonl` — under `subagents/`.
+    """
+    d = os.path.join(path[:-6] if path.endswith(".jsonl") else path, "subagents")
+    if not os.path.isdir(d):
+        return []
+    return [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(".jsonl")]
+
+
+def transcripts(files, miss):
+    """Distinct transcript paths the stop records name, in first-seen order."""
+    seen = []
+    for f in files:
+        try:
+            fh = open(f, encoding="utf-8", errors="replace")
+        except OSError:
+            miss["unreadable_status_files"] += 1
+            continue
+        with fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = J.loads(line)
+                except ValueError:
+                    miss["unparsable_status_lines"] += 1
+                    continue
+                p = d.get("transcript_path") if isinstance(d, dict) else None
+                if p and p not in seen:
+                    seen.append(p)
+    return seen
+
+
+def measure(tid):
+    miss = dict(unreadable_status_files=0, unparsable_status_lines=0,
+                unparsable_transcript_lines=0, transcripts_gone=0)
+    files = status_files(tid)
+    paths = transcripts(files, miss)
+    seen = set()
+    fresh = write = read = out = turns = side = 0
+    models = {}
+    subagents = 0
+    for p in list(paths):
+        for sp in subagent_files(p):
+            paths.append(sp)
+            subagents += 1
+    for p in paths:
+        try:
+            fh = open(p, encoding="utf-8", errors="replace")
+        except OSError:
+            miss["transcripts_gone"] += 1
+            continue
+        with fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = J.loads(line)
+                except ValueError:
+                    miss["unparsable_transcript_lines"] += 1
+                    continue
+                if not isinstance(d, dict) or d.get("type") != "assistant":
+                    continue
+                m = d.get("message")
+                if not isinstance(m, dict):
+                    continue
+                u = m.get("usage")
+                if not isinstance(u, dict):
+                    continue
+                # `<synthetic>` is the harness's own message — an API error
+                # notice, a cancellation — with an all-zero usage block. It was
+                # never a billed turn, so it counts as neither.
+                if m.get("model") == "<synthetic>":
+                    continue
+                # One line per content block repeats the same usage; the id is
+                # what makes them one turn. See the header.
+                key = m.get("id") or d.get("requestId") or d.get("uuid")
+                if key in seen:
+                    continue
+                seen.add(key)
+                turns += 1
+                if d.get("isSidechain"):
+                    side += 1
+                fresh += u.get("input_tokens") or 0
+                write += u.get("cache_creation_input_tokens") or 0
+                read += u.get("cache_read_input_tokens") or 0
+                o = u.get("output_tokens") or 0
+                out += o
+                models[m.get("model") or "unknown"] = models.get(m.get("model") or "unknown", 0) + o
+    inp = fresh + write + read
+    model = "+".join(k for k, _ in sorted(models.items(), key=lambda kv: (-kv[1], kv[0])))
+    return dict(task=tid, status_files=len(files),
+                transcripts=len(paths) - subagents, subagent_files=subagents,
+                transcript_paths=paths, turns=turns, subagent_turns=side,
+                input=inp, input_fresh=fresh, input_cache_write=write,
+                input_cache_read=read, output=out, models=models, model=model,
+                fragment=("tokens %s/%s %s" % (compact(inp), compact(out), model)) if turns else "tokens none",
+                missing=miss)
+
+
+def why_empty(r):
+    if not r["status_files"]:
+        return "no status file — nothing was recorded for this card"
+    if not r["transcripts"]:
+        return "%d status file(s), but no stop record names a transcript" % r["status_files"]
+    if r["missing"]["transcripts_gone"] == r["transcripts"]:
+        return "%d transcript(s) named, none still on disk" % r["transcripts"]
+    return "%d transcript(s) read, no assistant turn carried usage" % r["transcripts"]
+
+
+results, rc = [], 0
+for tid in ids:
+    if not ID.match(tid):
+        print("ERROR: not a task id: %s" % tid, file=sys.stderr)
+        sys.exit(2)
+    r = measure(tid)
+    if not r["turns"]:
+        rc = 1
+    results.append(r)
+
+if want_json:
+    print(J.dumps({"cards": results}, indent=2, sort_keys=True))
+    sys.exit(rc)
+
+for r in results:
+    print(r["task"])
+    if not r["turns"]:
+        print("  %s" % why_empty(r))
+    else:
+        print("  turns %d (%d in subagents) across %d transcript(s) and %d subagent file(s)"
+              % (r["turns"], r["subagent_turns"], r["transcripts"], r["subagent_files"]))
+        print("  input  %s = %s fresh + %s cache write + %s cache read"
+              % ("{:,}".format(r["input"]), "{:,}".format(r["input_fresh"]),
+                 "{:,}".format(r["input_cache_write"]), "{:,}".format(r["input_cache_read"])))
+        print("  output %s" % "{:,}".format(r["output"]))
+        print("  model  %s" % r["model"])
+    for k, v in sorted(r["missing"].items()):
+        if v:
+            print("  missing: %s %d" % (k, v))
+    print("  → %s" % r["fragment"])
+sys.exit(rc)
+PY

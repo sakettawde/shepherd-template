@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# Dispatch step 0 as one command: the lane a card names, ready at its
+# dev-branch tip. Conventions: docs/specs/2026-09-06-procedure-scripts-design.md.
+# The rule lives in skills/dispatch/SKILL.md step 0 and
+# docs/incidents/2026-09-02-stale-clone-tip.md; this file enforces it and adds none.
+#
+#   shepherd-lane T-NNNN [--dry-run] [--tip <ref>]
+#       READY <lane>     exit 0  the lane is detached at the tip; a lane this call created is
+#                                seeded and installed too. The key: value lines that follow are
+#                                its state, and `row-needed:` asks shepherd for the ## Clones
+#                                edit this script deliberately does not make
+#       HOLD <reason>    exit 1  dirty; a lane path already there; a lane path that is not a
+#                                worktree of the parent; a failed add, checkout, seed or
+#                                install - undo the claim (dispatch step 6) and report
+#       JUDGE <reason>   exit 3  `fetch failed` or `diverged`: no tip is right and no script
+#                                may choose one. Nothing was acted on; Saket decides
+#       REFUSED <why>    exit 1  the card is not briefed, or not yours - nothing was read past
+#                                the header, nothing was done
+#       ERROR <why>      exit 2  bad id, no card, no registry card, no path:/dev-branch:, a
+#                                `kind:` that is neither build nor reply, a `project:` that is
+#                                neither the family nor `<family>~<N>`, a parent that is not a
+#                                git working tree, a --tip that does not resolve, no tip ref at
+#                                all, or SHEPHERD_ID unset or malformed
+#
+# NOTE lines after the detail block are facts that did not block. `next:` is the
+# one line a shepherd acts on for HOLD and JUDGE.
+#
+# --dry-run prints the verdict and acts on nothing: no fetch, no checkout, no
+# worktree add, no prune, no copy, no install (the one write it can still cause
+# is git refreshing the lane's index as `status` reads it). It also reads a card
+# in any state, because reading one costs nothing; the acting run requires
+# `state: briefed`, the state the preflight's claim wrote, so a lane a worker is
+# already living in is never reset under it.
+#
+# --tip <ref> overrides the resolved tip with a ref that must already exist in
+# the parent. Dispatch passes it for a *review* reply, whose lane belongs at the
+# PR head rather than the dev branch.
+#
+# A creation that fails after the worktree exists takes the worktree back out
+# again (rollback_created), so a failed install cannot leave a half-prepared
+# lane that the next run would refuse as a leftover.
+#
+# Env: SHEPHERD_ID (the owner gate). SHEPHERD_ROOT is the base instance even when
+# this runs from a shepherd~N worktree (shepherd-common.sh).
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$HERE/../lib/shepherd-common.sh"
+REGISTRY_DIR="$SHEPHERD_ROOT/registry/projects"
+
+ME= TASK= CARD= STATE= OWNER= PROJECT= FAMILY= KIND= REG= REG_PATH= DEV_BRANCH= PARENT_COMMON=
+LANE= LANE_PATH= LANE_ROW= ROW_NEEDED=
+TIP_REF= TIP_SHA= TIP_SOURCE= TIP_GIVEN= FETCH= ACTION= SEED= INSTALL=
+DRY=0 CREATED=0
+NOTES=()
+EXTRA=()
+
+usage() {
+  printf 'ERROR usage: shepherd-lane T-NNNN [--dry-run] [--tip <ref>]\n'
+  sed -n '2,/^set -uo pipefail/{/^set -uo pipefail/!p}' "$0" >&2
+  exit 2
+}
+note() { NOTES+=("$*"); }
+print_notes() { local n; for n in "${NOTES[@]}"; do echo "NOTE $n"; done; }
+print_extra() { local e; for e in "${EXTRA[@]}"; do [ -n "$e" ] && printf '%s\n' "$e"; done; return 0; }
+err() { echo "ERROR $*"; print_notes; exit 2; }
+
+# hold / judge - the two verdicts that stop a dispatch. Both print everything
+# known about the lane, including what was already done to it: a hold raised
+# after a rollback has to say the worktree went away again, or a shepherd
+# reading the verdict cannot tell the path is free.
+hold()  { echo "HOLD $*"; emit_state; emit_details; print_extra; echo "next: undo the claim (dispatch step 6) and report this line"; print_notes; exit 1; }
+judge() { echo "JUDGE $*"; emit_state; emit_details; print_extra; echo "next: undo the claim (dispatch step 6) and report to Saket - no script chooses a tip here"; print_notes; exit 3; }
+
+emit_state() {
+  [ -n "$LANE" ] && echo "lane: $LANE"
+  [ -n "$LANE_PATH" ] && echo "path: $LANE_PATH"
+  [ -n "$LANE_ROW" ] && echo "row: $LANE_ROW"
+  [ -n "$REG_PATH" ] && echo "parent: $REG_PATH"
+  [ -n "$DEV_BRANCH" ] && echo "dev-branch: $DEV_BRANCH"
+  [ -n "$FETCH" ] && echo "fetch: $FETCH"
+  [ -n "$TIP_REF" ] && echo "tip: $TIP_REF ${TIP_SHA:0:12} ($TIP_SOURCE)"
+  return 0
+}
+emit_details() {
+  [ -n "$ACTION" ] && echo "action: $ACTION"
+  [ -n "$SEED" ] && echo "seed: $SEED"
+  [ -n "$INSTALL" ] && echo "install: $INSTALL"
+  [ -n "$ROW_NEEDED" ] && echo "row-needed: $ROW_NEEDED"
+  return 0
+}
+
+need_id() {
+  ME=${SHEPHERD_ID:-}
+  [ -n "$ME" ] || err "SHEPHERD_ID is unset"
+  valid_shepherd_id "$ME" >/dev/null 2>&1 || err "bad SHEPHERD_ID: $ME"
+}
+
+load_card() {
+  TASK=$1
+  [[ $TASK =~ ^T-[0-9]{4}$ ]] || err "bad task id: $TASK"
+  CARD="$TASKS_DIR/$TASK.md"
+  [ -f "$CARD" ] || err "no card: $CARD"
+  STATE=$(card_field "$CARD" state) || err "$TASK has no state: line"
+  OWNER=$(card_owner "$CARD")
+  PROJECT=$(card_field "$CARD" project) || err "$TASK has no project: line"
+  FAMILY=$(card_family "$PROJECT")
+  KIND=$(card_kind "$CARD")
+  case $KIND in build|reply) ;; *) err "$TASK kind: $KIND is neither build nor reply" ;; esac
+  [ "$OWNER" = "$ME" ] || { echo "REFUSED $TASK is owned by $OWNER, not $ME"; exit 1; }
+  # The acting run wants the state the preflight's claim wrote. A dry run reads
+  # any state and says which, so a shepherd can inspect a lane a worker holds.
+  if [ "$STATE" != briefed ]; then
+    [ "$DRY" -eq 1 ] || { echo "REFUSED $TASK is $STATE, not briefed"; exit 1; }
+    note "state $STATE: a dry run reads any state; the acting run requires briefed"
+  fi
+}
+
+load_registry() {
+  REG="$REGISTRY_DIR/$FAMILY.md"
+  [ -f "$REG" ] || err "no registry card: $REG"
+  REG_PATH=$(card_field "$REG" path) || err "registry card $FAMILY has no path:"
+  # A trailing slash would build `<parent>/-wt2` - a worktree INSIDE the
+  # parent's working tree, which then reads as dirt on the parent for ever.
+  REG_PATH=${REG_PATH%/}
+  DEV_BRANCH=$(card_field "$REG" dev-branch) || err "registry card $FAMILY has no dev-branch:"
+  git -C "$REG_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || err "parent $REG_PATH is not a git working tree"
+  PARENT_COMMON=$(git -C "$REG_PATH" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+}
+
+# clone_row_path <lane-id> - the ## Clones row's path, nothing when the table
+# has no row for that lane. The table's shape is | clone-id | path | ... |.
+clone_row_path() {
+  awk '/^## Clones/{p=1; next} /^## /{p=0} p' "$REG" \
+    | grep -E "^\| *$1 *\|" \
+    | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3; exit}'
+}
+
+# resolve_lane - the lane id, its path and what the registry knows of it. The
+# path of a lane with no row is derived, never invented per dispatch:
+# `<slug>~N` is `<parent>-wt<N>` and `reply-T-NNNN` is `<parent>-reply-T-NNNN`,
+# the two spellings the skill, the preflight and retro all use.
+resolve_lane() {
+  local n
+  if [ "$KIND" = reply ]; then
+    LANE="reply-$TASK"; LANE_PATH="$REG_PATH-reply-$TASK"; LANE_ROW=reply; return 0
+  fi
+  LANE=$PROJECT
+  if [ "$LANE" = "$FAMILY" ]; then
+    LANE_PATH=$REG_PATH; LANE_ROW=base; return 0
+  fi
+  n=${LANE##*~}
+  [[ $n =~ ^[0-9]+$ ]] || err "$PROJECT is neither $FAMILY nor $FAMILY~<N>"
+  LANE_PATH=$(clone_row_path "$LANE")
+  if [ -n "$LANE_PATH" ]; then
+    LANE_ROW=existing
+  else
+    LANE_PATH="$REG_PATH-wt$n"; LANE_ROW=missing
+  fi
+}
+
+# resolve_tip - the manual's tip choice, and the two stops it cannot resolve.
+# The remote-tracking ref wins at or ahead of the local branch, the local wins
+# when strictly ahead (the self-repo commits to local main and pushes by hand),
+# and whichever exists alone wins when only one does - a checkout that never
+# created the local branch, or a repo with no remote at all (T-0129, T-0215).
+#
+# Refs are read fully qualified and compared as SHAs. `rev-parse main` would
+# resolve `refs/tags/main` before `refs/heads/main` (gitrevisions' order), and
+# a sha is also what every later git call uses, so nothing this function
+# decided can be re-resolved differently by a repo further down.
+#
+# The manual's one-liner could only say "no origin, or the fetch failed",
+# because a shell running `fetch || echo` cannot tell the two apart. A script
+# can ask, so it does: no origin remote is the T-0129 case the incident already
+# blesses - answer from the local ref and say so - while a configured origin
+# whose fetch failed leaves a tip that may be stale, and that is Saket's call.
+resolve_tip() {
+  local parent=$1 has_origin=0 lsha= rsha=
+  git -C "$parent" remote get-url origin >/dev/null 2>&1 && has_origin=1
+  if [ "$has_origin" -eq 0 ]; then
+    FETCH="none (no origin remote)"
+    [ -n "$TIP_GIVEN" ] \
+      || note "no origin: $parent has no origin remote, so the tip comes from the local ref (T-0129)"
+  elif [ "$DRY" -eq 1 ]; then
+    FETCH="skipped (dry run) - the tip below is read from the refs on hand"
+  elif git -C "$parent" fetch origin --quiet 2>/dev/null; then
+    FETCH=ok
+  else
+    FETCH=failed
+    judge "fetch failed: origin is configured in $parent and the fetch did not succeed, so every ref below may be stale"
+  fi
+  if [ -n "$TIP_GIVEN" ]; then
+    TIP_SOURCE=given
+    TIP_REF=$TIP_GIVEN
+    TIP_SHA=$(git -C "$parent" rev-parse --verify --quiet "$TIP_GIVEN^{commit}") \
+      || err "--tip $TIP_GIVEN does not resolve in $parent"
+    return 0
+  fi
+  lsha=$(git -C "$parent" rev-parse --verify --quiet "refs/heads/$DEV_BRANCH^{commit}") || lsha=
+  rsha=$(git -C "$parent" rev-parse --verify --quiet "refs/remotes/origin/$DEV_BRANCH^{commit}") || rsha=
+  if [ -n "$lsha" ] && [ -n "$rsha" ]; then
+    if git -C "$parent" merge-base --is-ancestor "$lsha" "$rsha" 2>/dev/null; then
+      TIP_REF="origin/$DEV_BRANCH"; TIP_SHA=$rsha; TIP_SOURCE=remote
+    elif git -C "$parent" merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
+      TIP_REF=$DEV_BRANCH; TIP_SHA=$lsha; TIP_SOURCE=local
+    else
+      judge "diverged: $DEV_BRANCH and origin/$DEV_BRANCH in $parent have each moved past the other, so neither is the tip"
+    fi
+  elif [ -n "$lsha" ]; then
+    TIP_REF=$DEV_BRANCH; TIP_SHA=$lsha; TIP_SOURCE=local
+  elif [ -n "$rsha" ]; then
+    TIP_REF="origin/$DEV_BRANCH"; TIP_SHA=$rsha; TIP_SOURCE=remote
+  else
+    err "no tip: neither $DEV_BRANCH nor origin/$DEV_BRANCH exists in $parent"
+  fi
+}
+
+# rollback_created - take back the worktree THIS call added, when a later step
+# of the same creation fails. It removes only a directory made seconds ago by
+# this process, holding nothing but the failed setup; without it a failed
+# `npm install` would leave the path in place, and the next run would refuse it
+# as a leftover the skill forbids removing - burning the lane number for good
+# (T-0257 review). A removal that itself fails says so rather than trying
+# harder: the path is then shepherd's to clear by hand.
+rollback_created() {
+  [ "$CREATED" -eq 1 ] || return 0
+  CREATED=0
+  if git -C "$REG_PATH" worktree remove --force "$LANE_PATH" >/dev/null 2>&1; then
+    ACTION="rolled back: the worktree this call created was removed, so the path is free again"
+  else
+    ACTION="created at $TIP_REF and could not be removed: $LANE_PATH is this call's own, safe to clear by hand"
+  fi
+}
+
+# seed_lane - the registry's clone-seed paths, copied from the parent. An absent
+# field is the default set; `none` and an empty field both copy nothing, which
+# is what the self-repo's `clone-seed: none` means and what a literal `cp none`
+# would otherwise attempt. A seed path the parent does not have is skipped, not
+# an error - the list is the same for every project on a stack - but a copy that
+# FAILS is a stop, because the two are not the same fact and a worker that
+# starts without its credentials should not be told the parent never had them.
+seed_lane() {
+  local seed p want=0 got=0 missing=0 out
+  if ! seed=$(card_field "$REG" clone-seed); then seed='.dev.vars .env .env.local'; fi
+  case ${seed,,} in ''|none) SEED="none (nothing to copy)"; return 0 ;; esac
+  for p in $seed; do
+    want=$((want + 1))
+    if [ ! -e "$REG_PATH/$p" ]; then missing=$((missing + 1)); continue; fi
+    if [ "$DRY" -eq 1 ]; then got=$((got + 1)); continue; fi
+    if out=$(cp -R "$REG_PATH/$p" "$LANE_PATH/" 2>&1); then
+      got=$((got + 1))
+    else
+      SEED="failed on $p (present in the parent, not copied)"
+      EXTRA=("$(printf '%s\n' "$out" | tail -3)")
+      rollback_created
+      hold "seed copy failed for $LANE_PATH"
+    fi
+  done
+  SEED="$got copied, $missing of $want not in the parent"
+  [ "$DRY" -eq 1 ] && SEED="would copy $got, $missing of $want not in the parent"
+  return 0
+}
+
+# install_lane - the registry's install command, run once in the new lane.
+# A reply lane runs none: a reader that needs the suite installs in its own
+# lane, a local write the worktree discards with everything else.
+install_lane() {
+  local inst out rc
+  if [ "$KIND" = reply ]; then INSTALL="skipped (reply lane: seed only)"; return 0; fi
+  if ! inst=$(card_field "$REG" install); then inst='npm install'; fi
+  case ${inst,,} in ''|none) INSTALL="none (nothing to run)"; return 0 ;; esac
+  if [ "$DRY" -eq 1 ]; then INSTALL="would run: $inst"; return 0; fi
+  # The redirect wraps the `cd` as well as the command, so a lane that cannot
+  # be entered is reported with its own error rather than in silence.
+  out=$( { cd "$LANE_PATH" && bash -c "$inst"; } 2>&1 ); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    INSTALL="failed: $inst (exit $rc)"
+    EXTRA=("$(printf '%s\n' "$out" | tail -3)")
+    rollback_created
+    hold "install failed in $LANE_PATH"
+  fi
+  INSTALL="ran: $inst"
+}
+
+# create_lane - a worktree that is not there yet. The path is tested first
+# because git will not test it: `git worktree add --detach <existing-dir> <ref>`
+# ADOPTS an existing directory, empty or not, rather than refusing it (measured
+# against git 2.43.0 on this host, 2026-09-08; git-worktree(1) documents no
+# refusal). So a leftover reply lane, or a directory sitting where a `~N` lane
+# is about to be built, is caught here or nowhere.
+create_lane() {
+  local out
+  [ ! -e "$LANE_PATH" ] || hold "lane path exists: $LANE_PATH is already there, and git would adopt it rather than refuse it"
+  if [ "$DRY" -eq 1 ]; then ACTION="would-create at $TIP_REF"; return 0; fi
+  # A row whose path is gone left an administrative entry in the parent that
+  # would refuse `worktree add` at the same path. Pruning it here, rather than
+  # on the way in, keeps every stop above this line free of side effects.
+  [ "$LANE_ROW" != gone ] || git -C "$REG_PATH" worktree prune 2>/dev/null
+  out=$(git -C "$REG_PATH" worktree add --detach "$LANE_PATH" "$TIP_SHA" 2>&1) || {
+    EXTRA=("$(printf '%s\n' "$out" | tail -3)")
+    hold "worktree add failed for $LANE_PATH"
+  }
+  CREATED=1
+  ACTION="created at $TIP_REF"
+}
+
+# reuse_lane - a worktree already there. It is detached and nothing pulls it
+# forward, so it is reset to the tip - but only when `git status --porcelain`
+# is empty, because what happens to uncommitted work is Saket's call
+# (docs/incidents/2026-09-02-stale-clone-tip.md).
+reuse_lane() {
+  local dirty head out common
+  git -C "$LANE_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || hold "lane path is not a worktree of $REG_PATH: $LANE_PATH is not a git working tree at all"
+  # Being a git repo is not enough: only the SHARED OBJECT STORE makes the
+  # parent's tip mean anything here. An unrelated checkout at this path would
+  # otherwise be detached off its own branch and reset onto its own
+  # `origin/<dev-branch>`, and a worker would be launched into the wrong
+  # repository - where shepherd's own git verification would then read the
+  # wrong repo's facts (T-0257 review).
+  common=$(git -C "$LANE_PATH" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  [ -n "$common" ] && [ "$common" = "$PARENT_COMMON" ] \
+    || hold "lane path is not a worktree of $REG_PATH: $LANE_PATH is a different repository (shares no object store)"
+  dirty=$(git -C "$LANE_PATH" status --porcelain 2>/dev/null)
+  if [ -n "$dirty" ]; then
+    EXTRA=("dirty: $(printf '%s\n' "$dirty" | grep -c .) entries" "$(printf '%s\n' "$dirty" | head -5)")
+    hold "dirty $LANE_PATH"
+  fi
+  head=$(git -C "$LANE_PATH" rev-parse HEAD 2>/dev/null)
+  if [ "$head" = "$TIP_SHA" ]; then ACTION="already-at-tip"; return 0; fi
+  if [ "$DRY" -eq 1 ]; then ACTION="would-reset from ${head:0:12} to $TIP_REF"; return 0; fi
+  out=$(git -C "$LANE_PATH" checkout --detach "$TIP_SHA" 2>&1) || {
+    EXTRA=("$(printf '%s\n' "$out" | tail -3)")
+    hold "checkout failed in $LANE_PATH"
+  }
+  ACTION="reset from ${head:0:12} to $TIP_REF"
+}
+
+emit_ready() {
+  echo "READY $LANE"
+  emit_state
+  emit_details
+  print_notes
+  exit 0
+}
+
+main() {
+  TASK=${1:-}; [ -n "$TASK" ] || usage; shift
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dry-run) DRY=1; shift ;;
+      --tip) TIP_GIVEN=${2:-}; [ -n "$TIP_GIVEN" ] || usage; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  need_id
+  load_card "$TASK"
+  load_registry
+  resolve_lane
+  if [ "$LANE_ROW" = base ]; then
+    ACTION="none - the base checkout is never prepared, and never leaves its branch"
+    [ -z "$TIP_GIVEN" ] || note "--tip $TIP_GIVEN is unused: a base checkout is never moved to a tip"
+    emit_ready
+  fi
+  # A row whose path is gone is the no-row case, its row rewritten rather than
+  # added. The prune that frees the name happens in create_lane, below every
+  # stop, so a JUDGE here still means nothing was touched.
+  if [ "$LANE_ROW" = existing ] && [ ! -d "$LANE_PATH" ]; then
+    LANE_ROW=gone
+    note "row path gone: the ## Clones row for $LANE names $LANE_PATH, which is not there"
+  fi
+  resolve_tip "$REG_PATH"
+  case $LANE_ROW in
+    existing) reuse_lane; SEED="skipped (an existing lane keeps its seed)"; INSTALL="skipped (an existing lane keeps its install)" ;;
+    *)        create_lane; seed_lane; install_lane ;;
+  esac
+  case $LANE_ROW in
+    missing) ROW_NEEDED="$LANE $LANE_PATH write" ;;
+    gone)    ROW_NEEDED="$LANE $LANE_PATH rewrite" ;;
+  esac
+  emit_ready
+}
+
+main "$@"

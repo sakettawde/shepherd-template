@@ -1,0 +1,525 @@
+#!/usr/bin/env bash
+# Dispatch preconditions 2-6 as one command, plus the undo ladder. Spec:
+# docs/specs/2026-09-06-procedure-scripts-design.md S3. The rules live in
+# skills/dispatch/SKILL.md; this file enforces them and adds none.
+#
+#   shepherd-preflight T-NNNN [--lane-ok "<what you read>"]
+#       DISPATCH <lane>   exit 0  the lane lock and a worker slot are yours; the card reads briefed /
+#                                 claiming-<id>-T-NNNN and "T-NNNN: queued → briefed" is committed;
+#                                 the key: value lines that follow are dispatch step 0's inputs
+#       DISPATCH reply    exit 0  a `kind: reply` card: the slot is yours and NO lane lock was taken -
+#                                 the lane is a throwaway worktree (`lane:`), outside the family FIFO
+#                                 and the three gates (docs/specs/2026-09-07-linear-conversation-design.md §2)
+#       HOLD <reason>     exit 1  a precondition failed, named; nothing is held, the card is unchanged
+#                                 (a worker-cap hold adds one Log line)
+#       JUDGE ...         exit 3  gates 1-2 passed on a held lane; the registry excerpt follows -
+#                                 read it, then re-run with --lane-ok "<what you read>"
+#       ERROR <why>       exit 2  bad id, no card, no worker-cap in CLAUDE.md, or an unset
+#                                 SHEPHERD_ID / HERDR_PANE_ID / CLAUDE_CODE_SESSION_ID
+#   shepherd-preflight undo T-NNNN
+#       UNDONE ...        exit 0  the ladder, in order: queued / pane none / original project:,
+#                                 dispatch.lock released if held, the project lock released
+#                                 (a reply claim held none, and the detail line says so),
+#                                 "T-NNNN: briefed → queued" committed (exit 2 when the ladder ran
+#                                 but that last commit failed - the commit: detail line says so)
+#       REFUSED ...       exit 1  the card is not briefed, or not yours
+#
+# NOTE lines after the verdict are repairs that do not block (precondition 4).
+# Env: SHEPHERD_ID (owner and lock holder), HERDR_PANE_ID and CLAUDE_CODE_SESSION_ID
+# (the lock's pane and session fields), SHEPHERD_PREFLIGHT_RETRY (seconds between
+# dispatch-lock attempts, default 5; three attempts in all).
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$HERE/../lib/shepherd-common.sh"
+LOCK="$HERE/shepherd-lock"
+CARDSH="$HERE/shepherd-card"
+WA="$HERE/shepherd-working-agreement"
+COMMIT="$HERE/shepherd-commit"
+REGISTRY_DIR="$SHEPHERD_ROOT/registry/projects"
+RETRY=${SHEPHERD_PREFLIGHT_RETRY:-5}
+ME= PANE= SESSION=
+TASK= CARD= STATE= OWNER= PROJECT= FAMILY= CREATED= REG= KIND=
+LANE= LANE_PATH= LANE_ROW= LANE_OK= HELD_LINE= LOCK_OUT= SLOTS= CLAIM= COMMIT_LINE=
+DEV_BRANCH= REG_PATH=
+NOTES=()
+ACTIVE_SIBS=()
+
+usage() {
+  printf 'ERROR usage: shepherd-preflight T-NNNN [--lane-ok "<what you read>"] | undo T-NNNN\n'
+  sed -n '2,/^set -uo pipefail/{/^set -uo pipefail/!p}' "$0" >&2
+  exit 2
+}
+err()  { echo "ERROR $*"; print_notes; exit 2; }
+note() { NOTES+=("$*"); }
+print_notes() { local n; for n in "${NOTES[@]}"; do echo "NOTE $n"; done; }
+hold() { echo "HOLD $*"; print_notes; exit 1; }
+
+# need_id - just SHEPHERD_ID, set and well-formed. `undo` writes no lock line
+# (run_undo only *releases* locks, by SHEPHERD_ID alone) and needs nothing
+# else; need_env layers the two lock fields on top for the check path, which
+# does acquire.
+need_id() {
+  ME=${SHEPHERD_ID:-}
+  [ -n "$ME" ] || err "SHEPHERD_ID is unset"
+  valid_shepherd_id "$ME" >/dev/null 2>&1 || err "bad SHEPHERD_ID: $ME"
+}
+need_env() {
+  need_id
+  PANE=${HERDR_PANE_ID:-}; SESSION=${CLAUDE_CODE_SESSION_ID:-}
+  [ -n "$PANE" ] || err "HERDR_PANE_ID is unset (the lock's pane field)"
+  [ -n "$SESSION" ] || err "CLAUDE_CODE_SESSION_ID is unset (the lock's session field)"
+}
+
+load_card() {
+  TASK=$1
+  [[ $TASK =~ ^T-[0-9]{4}$ ]] || err "bad task id: $TASK"
+  CARD="$TASKS_DIR/$TASK.md"
+  [ -f "$CARD" ] || err "no card: $CARD"
+  STATE=$(card_field "$CARD" state) || err "$TASK has no state: line"
+  OWNER=$(card_owner "$CARD")
+  PROJECT=$(card_field "$CARD" project) || err "$TASK has no project: line"
+  FAMILY=$(card_family "$PROJECT")
+  CREATED=$(card_field "$CARD" created) || CREATED=
+  KIND=$(card_kind "$CARD")
+  case $KIND in build|reply) ;; *) err "$TASK kind: $KIND is neither build nor reply" ;; esac
+  REG="$REGISTRY_DIR/$FAMILY.md"
+}
+
+# deps_unmet <card> - prints "T-XXXX <state|missing>" for the first blocker not
+# done, exit 1; exit 0 silently when every blocker is done. A line whose first
+# word is none/nothing has no blockers, whatever ids the prose after it names.
+deps_unmet() {
+  local line ids id st
+  line=$(grep -m1 '^Depends on:' "$1" || true)
+  line=${line#Depends on:}
+  line="${line#"${line%%[![:space:]]*}"}"
+  case ${line,,} in ''|none*|nothing*) return 0 ;; esac
+  ids=$(grep -oE 'T-[0-9]{4}' <<<"$line" | awk '!seen[$0]++')
+  for id in $ids; do
+    if [ ! -f "$TASKS_DIR/$id.md" ]; then echo "$id missing"; return 1; fi
+    st=$(task_state "$id")
+    [ "$st" = done ] || { echo "$id ${st:-unknown}"; return 1; }
+  done
+  return 0
+}
+
+# older_dispatchable - the id of an older queued card of mine in the family
+# whose own blockers are done; exit 1 when there is none. An older sibling that
+# is itself blocked cannot move, so it does not hold the line.
+older_dispatchable() {
+  local f id proj cr
+  for f in $(grep -l '^state: queued' "$TASKS_DIR"/T-[0-9][0-9][0-9][0-9].md 2>/dev/null); do
+    id=$(basename "$f" .md); [ "$id" != "$TASK" ] || continue
+    [ "$(card_kind "$f")" != reply ] || continue   # a reply card is in no FIFO
+    proj=$(card_field "$f" project) || continue
+    [ "$(card_family "$proj")" = "$FAMILY" ] || continue
+    [ "$(card_owner "$f")" = "$ME" ] || continue
+    cr=$(card_field "$f" created) || continue
+    [ -n "$cr" ] && [ -n "$CREATED" ] || continue
+    [[ $cr < $CREATED ]] || continue
+    deps_unmet "$f" >/dev/null || continue
+    echo "$id"; return 0
+  done
+  return 1
+}
+
+load_registry() {
+  local onb
+  [ -f "$REG" ] || hold "no registry card $FAMILY"
+  onb=$(card_field "$REG" onboarded) || onb=
+  case $onb in yes*) ;; *) hold "onboarded ${onb:-missing}" ;; esac
+}
+
+# inlined_rules - numbered lines in ### Context alone: the section ends at the
+# next heading of ANY level, whatever it is called. A range that ended only at
+# ### Constraints ran to end-of-file on a card without one and counted a later
+# section's numbered lines as standing rules (T-0221 review).
+#
+# Ending at any level - so a `#### ` sub-heading inside Context would end it too
+# - is deliberate, not an oversight (T-0259). The count is a heuristic feeding a
+# `>= 4` test, so every widening of the range is a move toward a false DISPATCH:
+# a Context sub-heading listing four deliverables would pass precondition 4 with
+# no standing rules inlined, and send a worker into a repo whose CLAUDE.md it
+# cannot read. Under-counting only ever HOLDs, which a shepherd sees and judges.
+# No card in the ledger carries a heading inside its Context, so the widening
+# buys nothing real; reopen this only for a card that actually needs it.
+inlined_rules() { awk '/^### Context/{p=1; next} p && /^#+ /{p=0} p' "$CARD" | grep -cE '^[0-9]+\. '; }
+
+check_working_agreement() {
+  local field probe rc rules
+  REG_PATH=$(card_field "$REG" path) || hold "working-agreement: registry card $FAMILY has no path:"
+  DEV_BRANCH=$(card_field "$REG" dev-branch) || hold "working-agreement: registry card $FAMILY has no dev-branch:"
+  field=$(card_field "$REG" working-agreement) || field=missing
+  probe=$(bash "$WA" "$REG_PATH" "$DEV_BRANCH" 2>/dev/null); rc=$?
+  [ "$rc" -ne 2 ] || hold "working-agreement: probe error - $REG_PATH is not a git working tree"
+  rules=$(inlined_rules)
+  if [ -z "$probe" ]; then
+    [ "$rules" -ge 4 ] || hold "working-agreement: CLAUDE.md unreadable on origin/$DEV_BRANCH and the Brief inlines no standing rules - fill them from the template (precondition 4)"
+  elif [ "$probe" != "$field" ]; then
+    # A deliberate `none` whose Brief already inlines the rules leaves nothing
+    # to fix, and a NOTE on every self-repo dispatch would teach shepherd to
+    # skip NOTE lines.
+    if ! { [ "$field" = none ] && [ "$rules" -ge 4 ]; }; then
+      note "working-agreement: probe reads $DEV_BRANCH, registry says $field - correct the field unless the disagreement is deliberate (precondition 4)"
+    fi
+  fi
+}
+
+acquire_lane() {  # <lane> -> 0 acquired, 1 held, 2 error; LOCK_OUT holds the line
+  LOCK_OUT=$(bash "$LOCK" acquire "project-$1" "$ME" "$PANE" "$SESSION" "$TASK" 2>&1)
+}
+# release_lane - the reply guard is belt and braces: a reply claim never
+# acquired, and shepherd-lock would refuse the name anyway; it just keeps the
+# release from ever being attempted for a lane that has no lock by design.
+release_lane() { [ "$KIND" != reply ] && [ -n "$LANE" ] && bash "$LOCK" release "project-$LANE" "$ME" >/dev/null 2>&1; return 0; }
+
+# clone_rows - "<clone-id> <path>" per ## Clones row of the family, in ~N order
+clone_rows() {
+  awk '/^## Clones/{p=1; next} /^## /{p=0} p' "$REG" \
+    | grep -E "^\| *${FAMILY}~[0-9]+ *\|" \
+    | awk -F'|' '{gsub(/^ +| +$/, "", $2); gsub(/^ +| +$/, "", $3); print $2, $3}' \
+    | sort -t'~' -k2,2n
+}
+lane_path() {  # <lane> -> prints "<row> <path>" (row: base/existing/missing); see
+  # select_lane's case-0 caller - it reads both fields with `read` in the
+  # parent shell, because a `LANE_ROW=...; echo ...` side effect here would
+  # run inside the $(...) subshell of a plain `LANE_PATH=$(lane_path ...)`
+  # and never reach the caller's LANE_ROW.
+  local id p
+  if [ "$1" = "$FAMILY" ]; then echo "base $REG_PATH"; return; fi
+  while read -r id p; do
+    [ "$id" = "$1" ] && { echo "existing $p"; return; }
+  done < <(clone_rows)
+  echo "missing none"
+}
+
+safety() { local v; v=$(card_field "$1" parallel-safety) || v=; v=${v,,}; v=${v%%[[:space:]]*}; [ "$v" = independent ] && echo independent || echo serialized; }
+areas() {  # newline-separated lower-case tokens, or "*" for everything
+  local v; v=$(card_field "$1" touch-areas) || v=
+  if [ -z "${v//[[:space:]]/}" ]; then echo '*'; return; fi
+  tr ',' '\n' <<<"$v" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]' | grep -v '^$' | sort -u
+}
+overlap() {  # <areas-a> <areas-b> -> the first shared token, "*" when either touches everything, nothing when disjoint
+  if [ "$1" = '*' ] || [ "$2" = '*' ]; then echo '*'; return; fi
+  comm -12 <(printf '%s\n' "$1") <(printf '%s\n' "$2") | head -1
+}
+
+gates() {
+  local f id proj ps mine sib tok
+  ACTIVE_SIBS=()
+  for f in $(active_cards); do
+    id=$(basename "$f" .md); [ "$id" != "$TASK" ] || continue
+    [ "$(card_kind "$f")" != reply ] || continue   # a reply lane shares no lock and writes nothing
+    proj=$(card_field "$f" project) || continue
+    [ "$(card_family "$proj")" = "$FAMILY" ] || continue
+    ACTIVE_SIBS+=("$id")
+  done
+  ps=$(safety "$CARD")
+  [ "$ps" = independent ] || hold "gate 1 this card serialized (parallel-safety: $ps)"
+  for id in "${ACTIVE_SIBS[@]}"; do
+    [ "$(safety "$TASKS_DIR/$id.md")" = independent ] || hold "gate 1 $id serialized"
+  done
+  mine=$(areas "$CARD")
+  for id in "${ACTIVE_SIBS[@]}"; do
+    sib=$(areas "$TASKS_DIR/$id.md")
+    tok=$(overlap "$mine" "$sib")
+    [ -n "$tok" ] || continue
+    [ "$tok" = '*' ] && hold "gate 2 overlaps $id (touch-areas: everything)"
+    hold "gate 2 overlaps $id on \"$tok\""
+  done
+}
+
+judge() {
+  local h_holder h_task sibs
+  read -r _ _ h_holder _ _ h_task _ <<<"$HELD_LINE"
+  sibs=$(IFS=,; echo "${ACTIVE_SIBS[*]:-none}"); sibs=${sibs//,/, }
+  echo "JUDGE lane $PROJECT held by ${h_holder:-?} ${h_task:-}; gates 1-2 pass against $sibs"
+  awk '/^## Gotchas/{p=1; print; next} /^## /{p=0} p' "$REG"
+  awk '/^## Context notes/{p=1; print; next} /^## /{p=0} p' "$REG"
+  echo "next: re-run with --lane-ok \"<what you read>\" to open a lane, or leave the card queued"
+  print_notes
+  exit 3
+}
+
+walk() {
+  local id p rc n cand used=" "
+  while read -r id p; do
+    [ -n "$id" ] || continue
+    used="$used${id##*~} "
+    [ "$id" != "$PROJECT" ] || continue
+    acquire_lane "$id"; rc=$?
+    case $rc in
+      0) LANE=$id; LANE_PATH=$p; LANE_ROW=existing; return 0 ;;
+      2) hold "lock error: $LOCK_OUT" ;;
+    esac
+  done < <(clone_rows)
+  n=2
+  while :; do
+    cand="$FAMILY~$n"
+    case "$used" in *" $n "*) n=$((n + 1)); continue ;; esac
+    [ "$cand" != "$PROJECT" ] || { n=$((n + 1)); continue; }
+    break
+  done
+  acquire_lane "$cand"; rc=$?
+  case $rc in
+    0) LANE=$cand; LANE_PATH=none; LANE_ROW=missing; return 0 ;;
+    1) hold "no free lane: $cand held too ($LOCK_OUT)" ;;
+    *) hold "lock error: $LOCK_OUT" ;;
+  esac
+}
+
+select_lane() {
+  local rc
+  acquire_lane "$PROJECT"; rc=$?
+  case $rc in
+    0) LANE=$PROJECT; read -r LANE_ROW LANE_PATH <<<"$(lane_path "$PROJECT")"; return 0 ;;
+    2) hold "lock error: $LOCK_OUT" ;;
+  esac
+  HELD_LINE=$LOCK_OUT
+  gates
+  [ -n "$LANE_OK" ] || judge
+  walk
+}
+
+active_pane_count() {
+  local f
+  for f in $(active_cards); do
+    card_field "$f" pane
+  done | grep -v '^none$' | grep -v '^$' | sort -u | grep -c .
+}
+worker_cap() { sed -n 's/^- worker-cap: *\([0-9]\{1,\}\).*/\1/p' "$SHEPHERD_ROOT/CLAUDE.md" 2>/dev/null | head -1; }
+
+claim_slot() {
+  local i rc out cap count h lane_note
+  for i in 1 2 3; do
+    out=$(bash "$LOCK" acquire dispatch "$ME" "$PANE" "$SESSION" "$TASK" 2>&1); rc=$?
+    [ "$rc" -eq 1 ] || break
+    [ "$i" -lt 3 ] && sleep "$RETRY"
+  done
+  case $rc in
+    1) release_lane; read -r _ _ h _ <<<"$out"; hold "dispatch lock held by ${h:-?} - waiting" ;;
+    2) release_lane; hold "dispatch lock error: $out" ;;
+  esac
+  cap=$(worker_cap)
+  if [ -z "$cap" ]; then
+    bash "$LOCK" release dispatch "$ME" >/dev/null 2>&1; release_lane
+    err "worker-cap not found in $SHEPHERD_ROOT/CLAUDE.md (Operator block)"
+  fi
+  count=$(active_pane_count)
+  if [ "$count" -ge "$cap" ]; then
+    bash "$LOCK" release dispatch "$ME" >/dev/null 2>&1; release_lane
+    bash "$CARDSH" log "$TASK" "dispatch held: worker-cap $cap reached ($count active)" >/dev/null 2>&1
+    hold "worker-cap $count/$cap"
+  fi
+  CLAIM="claiming-$ME-$TASK"
+  SLOTS="$((count + 1))/$cap"
+  # A card-write failure here must not leak the two locks OR leave the card
+  # partially rewritten (state briefed but pane/project untouched) - run_undo
+  # is the ladder that unwinds both, the same way commit_claim's failure does.
+  lane_note="lane $LANE"; [ "$KIND" != reply ] || lane_note="lane $LANE at $LANE_PATH"
+  bash "$CARDSH" transition "$TASK" briefed --log "slot $SLOTS claimed as $CLAIM; $lane_note" --no-commit >/dev/null \
+    || { NOTES+=("undo: $(run_undo 2>&1 | tr '\n' ';')"); err "could not write $CARD"; }
+  if [ "$KIND" != reply ] && [ "$LANE" != "$PROJECT" ]; then
+    bash "$CARDSH" set "$TASK" pane "$CLAIM" project "$LANE" --no-commit >/dev/null \
+      || { NOTES+=("undo: $(run_undo 2>&1 | tr '\n' ';')"); err "could not write $CARD"; }
+    bash "$CARDSH" log "$TASK" "lane $LANE: $LANE_OK (relocated from $PROJECT)" --no-commit >/dev/null \
+      || { NOTES+=("undo: $(run_undo 2>&1 | tr '\n' ';')"); err "could not write $CARD"; }
+  else
+    bash "$CARDSH" set "$TASK" pane "$CLAIM" --no-commit >/dev/null \
+      || { NOTES+=("undo: $(run_undo 2>&1 | tr '\n' ';')"); err "could not write $CARD"; }
+  fi
+  bash "$LOCK" release dispatch "$ME" >/dev/null 2>&1
+}
+
+commit_claim() {
+  local out rc
+  out=$(bash "$COMMIT" "$TASK: queued → briefed" "ledger/tasks/$TASK.md" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    NOTES+=("undo: $(run_undo 2>&1 | tr '\n' ';')")
+    hold "commit failed: $(printf '%s\n' "$out" | head -1)"
+  fi
+  COMMIT_LINE=$(printf '%s\n' "$out" | tail -1)
+}
+
+# clone_seed / install_cmd - the registry's two worktree fields, defaulted.
+# card_field exits 0 with an EMPTY value for a present-but-blank line, so
+# `|| default` alone never fires for it - only for an ABSENT line (exit 1).
+# Per templates/registry-card.md: absent means the default; present-and-empty
+# means "copy/run nothing", which is not the default and must say so.
+clone_seed() {
+  local seed
+  if seed=$(card_field "$REG" clone-seed); then
+    [ -n "$seed" ] || seed='(empty - copy nothing)'
+  else
+    seed='.dev.vars .env .env.local'
+  fi
+  printf '%s\n' "$seed"
+}
+install_cmd() {
+  local inst
+  if inst=$(card_field "$REG" install); then
+    [ -n "$inst" ] || inst='(empty - run nothing)'
+  else
+    inst='npm install'
+  fi
+  printf '%s\n' "$inst"
+}
+
+# emit_reply - the detail lines for a reply lane: no row, no relocation, no
+# install (seed only - a reader that needs the suite installs in its own
+# lane, a local write the worktree discards). Spec §2 Lane.
+emit_reply() {
+  echo "DISPATCH reply"
+  echo "kind: reply"
+  echo "lane: $LANE"
+  echo "path: $LANE_PATH"
+  echo "parent: $REG_PATH"
+  echo "dev-branch: $DEV_BRANCH"
+  echo "clone-seed: $(clone_seed)"
+  echo "install: skipped (reply lane: seed only)"
+  echo "claim: $CLAIM"
+  echo "slots: $SLOTS"
+  echo "commit: $COMMIT_LINE"
+  print_notes
+}
+
+emit_dispatch() {
+  local seed inst
+  seed=$(clone_seed); inst=$(install_cmd)
+  echo "DISPATCH $LANE"
+  echo "lane: $LANE"
+  echo "path: $LANE_PATH"
+  echo "row: $LANE_ROW"
+  echo "parent: $REG_PATH"
+  echo "dev-branch: $DEV_BRANCH"
+  echo "clone-seed: $seed"
+  echo "install: $inst"
+  if [ "$LANE" != "$PROJECT" ]; then echo "relocated: from $PROJECT"; else echo "relocated: none"; fi
+  echo "claim: $CLAIM"
+  echo "slots: $SLOTS"
+  echo "commit: $COMMIT_LINE"
+  print_notes
+}
+
+cmd_check() {
+  local unmet older
+  TASK=$1; shift
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --lane-ok) LANE_OK=${2:-}; [ -n "$LANE_OK" ] || usage; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  need_env
+  load_card "$TASK"
+  [ "$STATE" = queued ] || hold "state $STATE"
+  [ "$OWNER" = "$ME" ] || hold "owner $OWNER"
+  unmet=$(deps_unmet "$CARD") || hold "depends-on $unmet"
+  if [ "$KIND" = reply ]; then
+    # No FIFO, no lane selection, no gates, no lock: the lane is a detached
+    # worktree nothing else reads, named here so step 0 and the Log agree.
+    load_registry
+    check_working_agreement
+    LANE="reply-$TASK"; LANE_PATH="$REG_PATH-reply-$TASK"; LANE_ROW=none
+    claim_slot
+    commit_claim
+    emit_reply
+    return
+  fi
+  older=$(older_dispatchable) && hold "queue $older older"
+  load_registry
+  check_working_agreement
+  select_lane
+  claim_slot
+  commit_claim
+  emit_dispatch
+}
+
+# relocated_from - the original project: from the last "(relocated from X)" Log
+# line that no later "briefed → queued" line has undone; nothing otherwise.
+relocated_from() {
+  awk '/^## Log/{p=1; next} p && /^## /{p=0} p {
+      if (match($0, /\(relocated from [^)]+\)/)) s = substr($0, RSTART + 16, RLENGTH - 17)
+      else if ($0 ~ /briefed → queued/) s = ""
+    } END { if (s != "") print s }' "$CARD"
+}
+
+# run_undo - the ladder in the skill's order. Prints its detail lines; returns
+# 0, or 2 when a card write or the final commit fails. A pure return-status
+# function - it never calls exit. commit_claim captures it inside a $(...)
+# subshell (piped through tr), where an exit would only end that substitution
+# and strand the rest of the ladder half-run; cmd_undo is the only caller that
+# turns the return status into a process exit.
+#
+# The lane to release is read fresh from the card's CURRENT project: on disk,
+# never from $PROJECT: called in-process from commit_claim's failure branch,
+# $PROJECT still names the lane load_card read at the top of cmd_check, but
+# claim_slot has since (uncommitted) rewritten project: to the lane it
+# actually relocated to and locked - that is the lock this call must release.
+# A standalone `undo T-NNNN` gets the same answer either way, because its own
+# load_card just read the committed project: fresh.
+#
+# Both lock releases always run, in order, whether or not the card writes
+# above them succeeded - a card-write failure must never leak a lock. The
+# final commit only runs when something was actually written; a REFUSED or
+# failed release, or the commit itself failing, is folded only into the
+# existing 0/2 exit status - never into a third code - because the detail
+# line already prints the verdict verbatim and a shepherd reads the lines.
+#
+# A card still `queued` has nothing to unwind: claim_slot's FIRST write failed
+# before it landed (edit() replaces the file whole or not at all), so a
+# transition to queued would only be REFUSED and once printed a second
+# "ERROR could not write" for a card nothing had touched (T-0221 review). The
+# locks are still released below, and the commit is skipped as unwritten.
+run_undo() {
+  local lane orig restored=unchanged out rc=0 lines=() wrote=0
+  lane=$(card_field "$CARD" project) || lane=$PROJECT
+  orig=$(relocated_from)
+  if [ "$(card_field "$CARD" state)" = queued ]; then
+    lines+=("card: unchanged - still queued")
+  elif bash "$CARDSH" transition "$TASK" queued --log "dispatch undone" --no-commit >/dev/null; then
+    wrote=1
+    if [ -n "$orig" ]; then
+      if bash "$CARDSH" set "$TASK" pane none project "$orig" --no-commit >/dev/null; then
+        restored="restored to $orig"
+      else
+        lines+=("ERROR could not write $CARD"); rc=2
+      fi
+    else
+      bash "$CARDSH" set "$TASK" pane none --no-commit >/dev/null \
+        || { lines+=("ERROR could not write $CARD"); rc=2; }
+    fi
+  else
+    lines+=("ERROR could not write $CARD"); rc=2
+  fi
+  out=$(bash "$LOCK" release dispatch "$ME" 2>&1); lines+=("dispatch: $(printf '%s\n' "$out" | head -1)")
+  if [ "$KIND" = reply ]; then
+    lane="reply-$TASK"; lines+=("project: none - a reply lane takes no lock")
+  else
+    out=$(bash "$LOCK" release "project-$lane" "$ME" 2>&1); lines+=("project-$lane: $(printf '%s\n' "$out" | head -1)")
+  fi
+  if [ "$wrote" -eq 1 ]; then
+    out=$(bash "$COMMIT" "$TASK: briefed → queued" "ledger/tasks/$TASK.md" 2>&1) || rc=2
+    lines+=("commit: $(printf '%s\n' "$out" | tail -1)")
+  else
+    lines+=("commit: skipped - $CARD was not written")
+  fi
+  echo "UNDONE $TASK lane $lane project $restored"
+  printf '%s\n' "${lines[@]}"
+  return "$rc"
+}
+
+cmd_undo() {
+  need_id
+  load_card "$1"
+  [ "$OWNER" = "$ME" ] || { echo "REFUSED $TASK is owned by $OWNER, not $ME"; exit 1; }
+  [ "$STATE" = briefed ] || { echo "REFUSED $TASK is $STATE, not briefed"; exit 1; }
+  run_undo
+  exit $?
+}
+
+case ${1:-} in
+  undo) shift; [ $# -eq 1 ] || usage; cmd_undo "$1" ;;
+  T-*)  cmd_check "$@" ;;
+  *) usage ;;
+esac

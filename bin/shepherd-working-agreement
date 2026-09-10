@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# CLAUDE.md S5's working-agreement check as a command. Spec:
+# docs/specs/2026-09-06-procedure-scripts-design.md S2.
+#
+#   shepherd-working-agreement <path> <dev-branch>
+#       prints <dev-branch>, exit 0   origin/<dev-branch>:CLAUDE.md is readable - a Brief may point the worker at the file
+#       prints nothing,     exit 1   it is not - the Brief must inline the standing rules (CLAUDE.md S6, T-0084)
+#       exit 2                       <path> is not a git working tree, or an argument is missing
+#
+# The three parts are the manual's, in its order: fetch (its failure is not a
+# verdict - a repo with no origin answers from the refs it has), then
+# `rev-parse --verify --quiet origin/<dev-branch>` BEFORE `cat-file -e`, because
+# cat-file exits 128 for a missing path and for a missing ref alike, so a
+# checkout that never fetched the ref would otherwise read as "no agreement".
+set -uo pipefail
+path=${1:-}; branch=${2:-}
+if [ -z "$path" ] || [ -z "$branch" ]; then
+  echo "usage: shepherd-working-agreement <path> <dev-branch>" >&2; exit 2
+fi
+if ! git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "ERROR: $path is not a git working tree" >&2; exit 2
+fi
+git -C "$path" fetch origin --quiet 2>/dev/null \
+  || echo "note: fetch origin failed in $path - answering from the refs on hand" >&2
+if git -C "$path" rev-parse --verify --quiet "origin/$branch" >/dev/null \
+   && git -C "$path" cat-file -e "origin/$branch:CLAUDE.md" 2>/dev/null; then
+  echo "$branch"
+  exit 0
+fi
+exit 1

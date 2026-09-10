@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Race-free task-id reservation. See docs/specs/2026-08-18-multi-shepherd-design.md S4
+# and docs/specs/2026-09-02-coordination-hardening-design.md.
+#
+#   shepherd-reserve reserve <holder> <pane> <session>   -> prints T-NNNN
+#   shepherd-reserve sweep [--dry-run]                   -> removes reservations whose claimant is gone;
+#                                                             exit 3 when a line needs a human (MALFORMED,
+#                                                             SWEEP-SKIPPED, UNKNOWN-LIVENESS, RM-FAILED),
+#                                                             else 0
+#
+# A reserved card holds one line and nothing else:
+#   reserved-by: <holder> <pane> <session> <iso8601>
+# Triage replaces it with the filled card. Cleanup is gated on the claimant
+# being gone, NEVER on the reservation's age - an LLM session can legitimately
+# sit half an hour between two tool calls.
+# Logged to ledger/events.log, one line per verdict, as
+#   <iso8601> <instance> reserve|reserve-sweep <task-id> <verdict> [detail...]
+# `reserve` logs its RESERVED and its cannot-write ERROR (the id it was trying);
+# a real `sweep` logs every verdict line it prints, and a `--dry-run` prints the
+# same lines and logs none. The refusals that reserve nothing write nothing: a
+# bad holder/pane/session argument, an exhausted id space, and no free id after
+# MAX_TRIES.
+set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/shepherd-common.sh"
+
+RESERVE_KEY='reserved-by:'
+MAX_TRIES=50
+
+usage() { sed -n '2,/^set -uo pipefail/{/^set -uo pipefail/!p}' "$0" >&2; exit 2; }
+
+cmd_reserve() {
+  local holder=$1 pane=$2 session=$3 max next id i arg
+  # Validate arguments: must be non-empty and free of whitespace
+  for arg in "$holder" "$pane" "$session"; do
+    case $arg in
+      ''|*[[:space:]]*)
+        echo "ERROR: holder, pane and session must be non-empty and free of whitespace" >&2
+        return 2 ;;
+    esac
+  done
+  mkdir -p "$TASKS_DIR"
+  for (( i = 1; i <= MAX_TRIES; i++ )); do
+    max=$(ls "$TASKS_DIR"/T-[0-9][0-9][0-9][0-9].md 2>/dev/null \
+          | sed 's|.*/T-\([0-9]\{4\}\)\.md$|\1|' | sort -n | tail -1)
+    next=$(( 10#${max:-0} + 1 ))
+    if [ "$next" -gt 9999 ]; then
+      echo "ERROR: task id space exhausted (T-9999 reached)" >&2
+      return 2
+    fi
+    id=$(printf 'T-%04d' "$next")
+    atomic_create "$TASKS_DIR/$id.md" "$RESERVE_KEY $holder $pane $session $(now_iso)"
+    case $? in
+      0) elog "$holder" reserve "$id" RESERVED; echo "$id"; return 0 ;;
+      1) : ;;                              # another instance won this number; try the next
+      *) elog "$holder" reserve "$id" ERROR "cannot write $TASKS_DIR"; echo "ERROR: cannot write $TASKS_DIR" >&2; return 2 ;;
+    esac
+  done
+  echo "ERROR: no free task id after $MAX_TRIES tries" >&2
+  return 1
+}
+
+# Exit 3 when at least one printed line needs a human (MALFORMED,
+# SWEEP-SKIPPED, UNKNOWN-LIVENESS, RM-FAILED); 0 only when everything it saw was
+# routine. `--dry-run` prints the same verdicts, deletes nothing, logs nothing.
+cmd_sweep() {
+  local dry=0 rc=0 me=${SHEPHERD_ID:--}
+  case ${1:-} in
+    --dry-run) dry=1 ;;
+    '') ;;
+    *) usage ;;
+  esac
+  # say <verdict> <target> <rest...>: print the line exactly as before, log it
+  # (unless dry), and raise the exit code for the human-needed kinds.
+  say() {
+    local verdict=$1 target=$2; shift 2
+    echo "$verdict $target $*"
+    [ "$dry" -eq 1 ] || elog "$me" reserve-sweep "$target" "$verdict" "$*"
+    case $verdict in MALFORMED|SWEEP-SKIPPED|UNKNOWN-LIVENESS|RM-FAILED) rc=3 ;; esac
+  }
+  [ "$dry" -eq 1 ] && echo "DRY-RUN no changes will be made"
+
+  # A liveness oracle that cannot answer must never be read as "every claimant is gone".
+  # Without this, one herdr outage at session start would delete every live reservation.
+  # The test-hook bypass below only applies when hooks_active (SHEPHERD_TEST_HOOKS=1):
+  # outside a test harness, SHEPHERD_LIVENESS_OVERRIDE/UNKNOWN merely being set
+  # in the environment must never itself skip the real pane_probe check.
+  if ! hooks_active || { [ -z "${SHEPHERD_LIVENESS_OVERRIDE+x}" ] && [ -z "${SHEPHERD_LIVENESS_UNKNOWN+x}" ]; }; then
+    if [ -z "${HERDR_PANE_ID:-}" ] || ! pane_probe "$HERDR_PANE_ID" >/dev/null 2>&1; then
+      echo "SWEEP-SKIPPED liveness oracle unavailable - no reservations inspected"
+      [ "$dry" -eq 1 ] || elog "$me" reserve-sweep - SWEEP-SKIPPED "liveness oracle unavailable"
+      return 3
+    fi
+  fi
+
+  local f id key holder pane session ts line live_rc
+  for f in "$TASKS_DIR"/T-[0-9][0-9][0-9][0-9].md; do
+    [ -e "$f" ] || continue
+    line=$(lock_line "$f")
+    read -r key holder pane session ts <<<"$line"
+    [ "$key" = "$RESERVE_KEY" ] || continue
+    id=$(basename "$f" .md)
+    if [ -z "$holder" ] || [ -z "$pane" ] || [ -z "$session" ]; then
+      say MALFORMED "$id" "- left in place, inspect by hand"
+      continue
+    fi
+    # The holder is passed so a claimant that rolled over (new session id,
+    # identity lock re-acquired) still reads live - hardening spec S6.
+    shepherd_live "$pane" "$session" "$holder"
+    live_rc=$?
+    case $live_rc in
+      0) say RESERVED "$id" "by $holder (claimant live - left alone)" ;;
+      1)
+        # The liveness probe above is a herdr round-trip. Another instance
+        # may have swept this same reservation and a fresh reserve() landed
+        # on this id while we waited. Deleting on the stale read would
+        # unlink a LIVE claimant's reservation and hand the id to a second
+        # instance. The timestamp field makes each acquisition's line
+        # unique, so re-reading it here is a sound compare-before-delete.
+        if [ "$(lock_line "$f")" != "$line" ]; then
+          say CHANGED "$id" "- re-acquired during the liveness probe, left alone"
+        # A dry run takes the success path without calling rm at all; a real
+        # run reports what rm actually did. Unchecked, an unwritable tasks
+        # directory printed a bare `rm: cannot remove ...` and then claimed
+        # SWEPT for a reservation still on disk - the false audit claim
+        # shepherd-lock's release and sweep both refuse to make.
+        elif [ "$dry" -eq 1 ] || rm -f "$f" 2>/dev/null; then
+          say SWEPT "$id" "(reserved by $holder, claimant gone)"
+        else
+          say RM-FAILED "$id" "- could not remove, inspect by hand"
+        fi
+        ;;
+      # Anything other than gone (1) - unresolved (2), or any
+      # return code shepherd_live's contract does not promise - must never
+      # reach the delete arm. Only an explicit 1 may free a reservation.
+      *) say UNKNOWN-LIVENESS "$id" "$holder - cannot reach herdr for pane $pane, left in place" ;;
+    esac
+  done
+  [ "$dry" -eq 1 ] || find "$TASKS_DIR" -maxdepth 1 -name '.tmp.*' -mmin +60 -delete 2>/dev/null
+  return "$rc"
+}
+
+case ${1:-} in
+  reserve) shift; [ $# -eq 3 ] || usage; cmd_reserve "$@" ;;
+  sweep)   shift; [ $# -le 1 ] || usage; cmd_sweep "${1:-}" ;;
+  *) usage ;;
+esac

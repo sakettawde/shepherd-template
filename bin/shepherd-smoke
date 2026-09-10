@@ -1,0 +1,611 @@
+#!/usr/bin/env bash
+# shepherd-smoke — the end-to-end canary for the dispatch → hook → watcher path.
+#
+# Run from shepherd's own pane inside herdr. It spawns a worker pane through the adapter
+# recipes (R2), launches a worker Claude on a one-line task with the real hooks (R3), kicks
+# it off (R4), waits on the status file the Stop hook writes (R5), verifies the claim landed
+# with the hook-written fields AND that the task's one file exists (R7, CLAUDE.md §2 rule 1),
+# and retires the pane (R9). One line per step:
+#
+#   smoke: PASS|FAIL|SKIP <step>  <detail>      steps: gate pane launch kickoff claim verify retire
+#   smoke: PASS 7/7  |  smoke: FAIL n/7 failed at <step> [— kept <dir>, from launch onward]      exit 0 only on 7/7
+#
+# Everything it writes lives under one mktemp -d: the worker's cwd, the status file, the
+# transcript it verifies. It never touches ledger/, a project repo or ~/.claude/ (it reads
+# ~/.claude/settings.json once, in the gate). On PASS the temp dir is removed; a FAIL names
+# the step, and from the launch step onward it also keeps its temp directory. After a FAIL
+# the later steps print SKIP — except retire, which still runs when the pane exists and its
+# agent is idle (a working or blocked agent is never closed).
+#
+# Usage:
+#   shepherd-smoke              live canary — herdr pane, real claude, real hooks
+#   shepherd-smoke --dry-run    every step against an in-script herdr stub, no claude, the
+#                                 real hooks/worker-stop.sh driven with a Stop payload; what
+#                                 tests/test-smoke.sh runs
+#
+# Env (all optional):
+#   SMOKE_MODEL  opus   SMOKE_EFFORT  low   the worker's tier; its subagents follow the same alias (adapter R3)
+#                                          (CLAUDE.md §6); a one-file task needs no depth
+#   SMOKE_WAIT   300    seconds to wait for the terminal claim (the R5 window)
+#   SMOKE_READY  45     seconds for the agent to be detected and idle after launch
+#   SMOKE_REGISTER 30   seconds for herdr to REGISTER the agent (publish agent_session) after
+#                       detecting it — detection and registration are not the same instant
+#   SMOKE_KICKOFF_TRIES 3 / SMOKE_KICKOFF_BACKOFF 5
+#                       agent_not_found retries at kickoff, and the seconds between them
+#   SHEPHERD_SMOKE_SCENARIO   dry-run only: pass | trust-dialog | no-claim | no-file |
+#                             pane-focused | agent-lag | never-registers | agent-unaddressable
+#                             — makes the canary fail on purpose, so a test can prove it can
+#
+# herdr syntax below is copied from skills/herdr-adapter/references/v0.8.2.md
+# (R1–R9) and nowhere else; regenerate this script with the adapter when the pin moves.
+set -uo pipefail
+here=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+
+usage() {
+  cat <<'USAGE'
+shepherd-smoke [--dry-run]   the dispatch -> hook -> watcher canary
+
+  (no flag)    live canary: a real worker pane, a real claude, the real hooks.
+               Run it from inside a herdr pane with no active tasks.
+  --dry-run    the same seven steps against an in-script herdr stub, no claude
+               launched, driving the real hooks/worker-stop.sh. What the test
+               harness runs; it proves the script, not the herdr install.
+
+Steps: gate pane launch kickoff claim verify retire. One line each, exit 0 only
+on 7/7. A FAIL names the step, and from the launch step onward it also keeps
+its temp directory.
+
+Env: SMOKE_MODEL (opus) SMOKE_EFFORT (low) SMOKE_WAIT (300s, the claim window)
+     SMOKE_READY (45s, agent detection) SMOKE_REGISTER (30s, agent REGISTRATION -
+     herdr publishes agent_session seconds after it detects the agent, and only
+     then is the agent addressable) SMOKE_KICKOFF_TRIES (3) SMOKE_KICKOFF_BACKOFF
+     (5s, the agent_not_found retries) SHEPHERD_SMOKE_SCENARIO (dry-run only:
+     pass|trust-dialog|no-claim|no-file|pane-focused|agent-lag|never-registers|
+     agent-unaddressable - makes the canary fail on purpose, so a test can prove
+     it can).
+USAGE
+}
+
+DRY=0
+case "${1:-}" in
+  --dry-run) DRY=1 ;;
+  "") ;;
+  -h|--help) usage; exit 0 ;;
+  *) echo "smoke: unknown argument $1 (usage: shepherd-smoke [--dry-run])" >&2; exit 2 ;;
+esac
+
+SMOKE_MODEL=${SMOKE_MODEL:-opus}
+SMOKE_EFFORT=${SMOKE_EFFORT:-low}
+SMOKE_WAIT=${SMOKE_WAIT:-300}
+SMOKE_READY=${SMOKE_READY:-45}
+SMOKE_REGISTER=${SMOKE_REGISTER:-30}
+SMOKE_KICKOFF_TRIES=${SMOKE_KICKOFF_TRIES:-3}
+SMOKE_KICKOFF_BACKOFF=${SMOKE_KICKOFF_BACKOFF:-5}
+SMOKE_SELECT_MOVES=${SMOKE_SELECT_MOVES:-4}
+SCENARIO=${SHEPHERD_SMOKE_SCENARIO:-pass}
+[ "$DRY" -eq 1 ] || SCENARIO=pass          # scenarios never apply live
+
+PIN_FILE="$here/skills/herdr-adapter/SKILL.md"
+HOOK="$here/hooks/worker-stop.sh"
+
+# --- reporting ---------------------------------------------------------------------------
+PASSED=0; FAILED=0; FAILED_AT=""
+pass() { PASSED=$((PASSED + 1)); printf 'smoke: PASS %-8s %s\n' "$1" "$2"; }
+fail() { FAILED=$((FAILED + 1)); FAILED_AT=${FAILED_AT:-$1}; printf 'smoke: FAIL %-8s %s\n' "$1" "$2"; }
+skip() { printf 'smoke: SKIP %-8s %s\n' "$1" "$2"; }
+
+# jget <dotted.path> — the adapter's JSON reader (no jq on this machine); "" on any miss.
+# Python reprs non-strings: null → None, true/false → True/False. Callers match on those.
+jget() { python3 -c "import sys,json,functools; d=json.load(sys.stdin); print(functools.reduce(lambda a,k: a[int(k)] if isinstance(a,list) else a[k], sys.argv[1].split('.'), d))" "$1" 2>/dev/null; }
+
+# --- the canary's world ------------------------------------------------------------------
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/shepherd-smoke.XXXXXX") || { echo "smoke: cannot create a temp dir" >&2; exit 2; }
+WORK="$TMP/work"; mkdir -p "$WORK"
+SMOKE_ID="SMOKE-$(date +%H%M%S)"
+# Named for the canary's own id, as every real launch line names the task's
+# (adapter R3: ledger/status/T-NNNN.jsonl). The hooks refuse to write into a
+# file that is not their task's (T-0254), so a rehearsal whose two env vars
+# disagreed would record nothing and fail its own claim step.
+STATUS="$TMP/$SMOKE_ID.jsonl"
+PID=""
+CLAIM=""
+TASK_LINE="Smoke canary $SMOKE_ID. Create a file named smoke-ok.txt in the current directory containing exactly the word ok, then stop and end your reply with this exact line on its own: SHEPHERD: done — smoke ok"
+
+pin() { grep -oE 'Pinned version: [0-9.]+' "$PIN_FILE" | head -1 | awk '{print $3}'; }
+
+# --- dry-run: herdr as a shell function, the worker as the real Stop hook -----------------
+if [ "$DRY" -eq 1 ]; then
+  STUB="$TMP/stub"; mkdir -p "$STUB"
+  printf 'idle\n'  > "$STUB/status"
+  printf 'false\n' > "$STUB/focused"
+  DRY_SID="dry-$$"
+  case "$SCENARIO" in
+    pane-focused) printf 'true\n' > "$STUB/focused" ;;
+    trust-dialog) printf 'blocked\n' > "$STUB/status"; : > "$STUB/dialog" ;;
+    # The live 2026-09-02 failure, reproduced: herdr detects the agent but does not register
+    # the session for two more polls, and answers agent_not_found to the first prompt.
+    agent-lag)      printf '2\n' > "$STUB/reglag"; printf '1\n' > "$STUB/notfound" ;;
+    # Registration never arrives — the gate must give up loudly instead of prompting a
+    # pane herdr cannot address.
+    never-registers) printf '9999\n' > "$STUB/reglag" ;;
+    # Registered, but every prompt still answers agent_not_found: the retries must run out
+    # and the step must FAIL rather than retry forever or report success.
+    agent-unaddressable) printf '9999\n' > "$STUB/notfound" ;;
+    # The dialog does not appear until two polls in — the case a fixed-delay answer misses.
+    # The gate must keep looking for it, answer it, and only then read registration.
+    late-dialog)     printf '2\n' > "$STUB/dialoglag"; printf '6\n' > "$STUB/reglag" ;;
+    # The dialog is on screen and Enter will NOT dismiss it (the live round-two shape).
+    # Launch must fail, and retire must still clear it with Escape and close the pane.
+    dialog-left-open) printf 'blocked\n' > "$STUB/status"; : > "$STUB/dialog"; : > "$STUB/enterstuck" ;;
+    # The MEASURED default (round three): the caret starts on "No, exit". A bare Enter would
+    # quit Claude. The canary must move the caret to Yes, verify it, and only then confirm.
+    wrong-default-option) printf 'blocked\n' > "$STUB/status"; : > "$STUB/dialog"; printf 'no\n' > "$STUB/sel" ;;
+    # The caret cannot be moved: the canary must REFUSE to confirm rather than guess, because
+    # confirming the default is what killed the worker.
+    caret-stuck)     printf 'blocked\n' > "$STUB/status"; : > "$STUB/dialog"; printf 'no\n' > "$STUB/sel"; : > "$STUB/selstuck" ;;
+    # Claude exits however the dialog went: the pane falls back to a shell with no agent.
+    # The gate must fail FAST and say the worker is gone; retire must close the dead pane.
+    claude-exited)   printf 'blocked\n' > "$STUB/status"; : > "$STUB/dialog"; printf 'no\n' > "$STUB/sel"; : > "$STUB/exitonenter" ;;
+  esac
+  # dry_worker — what a real worker's turn produces: the file, then the Stop hook's record.
+  # The hook is the real one, so `verify` reads hook-written fields, not stub-typed ones.
+  dry_worker() {
+    local msg
+    msg=$(printf 'Created smoke-ok.txt.\n\nSHEPHERD: done — smoke ok')
+    [ "$SCENARIO" = no-claim ] && msg='Created smoke-ok.txt. All good.'
+    [ "$SCENARIO" = no-file ] || printf 'ok\n' > "$WORK/smoke-ok.txt"
+    : > "$TMP/transcript.jsonl"
+    SMOKE_MSG="$msg" python3 -c 'import json,os,sys; print(json.dumps({"session_id":sys.argv[1],"hook_event_name":"Stop","stop_reason":"end_turn","permission_mode":"auto","transcript_path":sys.argv[2],"last_assistant_message":os.environ["SMOKE_MSG"]}))' "$DRY_SID" "$TMP/transcript.jsonl" \
+      | SHEPHERD_TASK_ID="$SMOKE_ID" SHEPHERD_STATUS_FILE="$STATUS" bash "$HOOK" >/dev/null 2>&1
+    printf 'idle\n' > "$STUB/status"
+  }
+  herdr() {
+    printf '%s\n' "$*" >> "$STUB/calls"
+    case "$1 ${2:-}" in
+      "--version ")     echo "herdr $(pin)" ;;
+      "status ")        printf 'server: running\ncompatible: yes\n' ;;
+      "tab create")     echo '{"result":{"tab":{"tab_id":"wD:t9"},"root_pane":{"pane_id":"wD:p9"}}}' ;;
+      "tab get")        echo '{"result":{"tab":{"tab_id":"wD:t9","pane_count":1}}}' ;;
+      "pane rename")    : ;;
+      "pane run")       printf 'claude\n' > "$STUB/agent" ;;        # the launch is what herdr detects
+      "pane get")
+        # agent_session is withheld while reglag counts down — herdr's detected-but-not-yet-
+        # registered window. `agent` is already populated there, which is exactly why waiting
+        # on `agent` alone was the bug.
+        sess="\"$DRY_SID\""
+        # herdr publishes no agent_session while the trust dialog is up — the round-two
+        # failure. The stub models that, so the gate is tested against the real shape.
+        [ -f "$STUB/dialog" ] && sess=null
+        [ -f "$STUB/exited" ] && sess=null
+        if [ -s "$STUB/reglag" ]; then
+          n=$(cat "$STUB/reglag")
+          if [ "$n" -gt 0 ]; then sess=null; printf '%s\n' "$((n - 1))" > "$STUB/reglag"; fi
+        fi
+        # tab_id is required on a real PaneInfo and is what R9 reads the tab from.
+        printf '{"result":{"pane":{"pane_id":"wD:p9","tab_id":"wD:t9","label":"w-smoke","focused":%s,"agent":%s,"agent_status":"%s","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":%s}}}}\n' \
+          "$(cat "$STUB/focused")" "$([ -s "$STUB/agent" ] && echo '"claude"' || echo null)" "$(cat "$STUB/status")" "$sess" ;;
+      "agent wait")     printf '{"result":{"status":"%s"}}\n' "$(cat "$STUB/status")" ;;
+      "pane read")
+        # A late dialog: it is not on screen for the first N reads, then it appears.
+        if [ -s "$STUB/dialoglag" ]; then
+          n=$(cat "$STUB/dialoglag")
+          if [ "$n" -gt 0 ]; then printf '%s\n' "$((n - 1))" > "$STUB/dialoglag"
+          else rm -f "$STUB/dialoglag"; : > "$STUB/dialog"; printf 'blocked\n' > "$STUB/status"; fi
+        fi
+        if [ -f "$STUB/exited" ]; then
+          # Claude is gone; the pane fell back to the shell it was launched from.
+          printf 'saket@box:/tmp/smoke$ \n'
+        elif [ -f "$STUB/dialog" ]; then
+          echo 'Is this a project you created or one you trust?'
+          # The caret marks the SELECTED row, and it starts on "No, exit" (measured).
+          if [ "$(cat "$STUB/sel" 2>/dev/null || echo no)" = yes ]; then
+            echo '❯ 1. Yes, I trust this folder'
+            echo '  2. No, exit'
+          else
+            echo '  1. Yes, I trust this folder'
+            echo '❯ 2. No, exit'
+          fi
+        else echo '❯'; fi ;;
+      "pane send-keys")
+        # Enter accepts the pre-highlighted "Yes, I trust this folder"; Escape cancels the
+        # dialog outright. `enterstuck` models a dialog Enter does not dismiss, which is what
+        # leaves a pane behind if retire will not clear it.
+        case "${4:-}" in
+          Escape) rm -f "$STUB/dialog"; printf 'idle\n' > "$STUB/status" ;;
+          Down|Tab|Up)
+            # Move the caret, unless this scenario pins it.
+            if [ -f "$STUB/dialog" ] && [ ! -f "$STUB/selstuck" ]; then
+              if [ "$(cat "$STUB/sel" 2>/dev/null || echo no)" = yes ]; then printf 'no\n' > "$STUB/sel"
+              else printf 'yes\n' > "$STUB/sel"; fi
+            fi ;;
+          Enter|*)
+            # Enter CONFIRMS WHATEVER IS SELECTED — the round-three lesson. Confirming
+            # "No, exit" quits Claude and leaves the pane at a shell.
+            if [ -f "$STUB/dialog" ] && [ ! -f "$STUB/enterstuck" ]; then
+              if [ -f "$STUB/exitonenter" ] || [ "$(cat "$STUB/sel" 2>/dev/null || echo yes)" = no ]; then
+                rm -f "$STUB/dialog" "$STUB/agent"; : > "$STUB/exited"
+                printf 'unknown\n' > "$STUB/status"
+              else
+                rm -f "$STUB/dialog"; printf 'idle\n' > "$STUB/status"
+              fi
+            fi ;;
+        esac ;;
+      "agent prompt")
+        if [ -s "$STUB/notfound" ] && [ "$(cat "$STUB/notfound")" -gt 0 ]; then
+          printf '%s\n' "$(( $(cat "$STUB/notfound") - 1 ))" > "$STUB/notfound"
+          echo '{"error":{"code":"agent_not_found","message":"no agent on wD:p9"}}'
+        else
+          dry_worker; echo '{"result":{"type":"agent_prompted"}}'
+        fi ;;
+      "pane close")     : > "$STUB/closed" ;;
+      *) : ;;
+    esac
+    return 0
+  }
+fi
+
+# --- pane readers (R6, R7) ---------------------------------------------------------------
+pane_field() { herdr pane get "$PID" 2>/dev/null | jget "result.pane.$1"; }
+pane_tail()  { herdr pane read "$PID" --source visible --lines 30 --format text 2>/dev/null | grep -v '^[[:space:]]*$' | tail -6 | tr '\n' ' ' | cut -c1-300; }
+last_field() { python3 -c 'import json,sys
+lines=[l for l in open(sys.argv[1],encoding="utf-8") if l.strip()]
+print((json.loads(lines[-1]).get(sys.argv[2]) or "") if lines else "")' "$STATUS" "$1" 2>/dev/null; }
+hooks_registered() {
+  python3 - "$HOME/.claude/settings.json" <<'PY' 2>/dev/null
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+for e in (s.get("hooks") or {}).get("Stop") or []:
+    for h in e.get("hooks") or []:
+        if h.get("command", "").rstrip("'\"").endswith("worker-stop.sh"):
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# trust_dialog_showing — Claude Code's folder-trust prompt is on screen. One matcher, used by
+# the launch gate and by retire, so the two can never disagree about what a dialog looks like.
+# Matched on the question and on the option text, because a narrow pane wraps.
+trust_dialog_showing() {
+  pane_tail | grep -qiE 'project you created or one you trust|trust this folder'
+}
+
+# shell_prompt_showing — the pane is sitting at a shell, i.e. no agent is running in it.
+# Deliberately generous: it is only ever consulted once `agent` is already empty, so its job
+# is to distinguish "the process exited and left a shell" from "herdr has not detected the
+# agent yet", not to identify a shell in the abstract.
+shell_prompt_showing() {
+  pane_tail | grep -qE '[$#][[:space:]]*$|[[:alnum:]_.-]+@[[:alnum:]_.-]+:[^[:space:]]*[$#]|bash-[0-9]'
+}
+
+# trust_yes_selected — the caret is on the option that ACCEPTS. Claude Code marks the
+# selected row with a caret; match any of the glyphs it and similar TUIs use, immediately
+# before the accepting option's text on the same line.
+trust_yes_selected() {
+  pane_tail | grep -qiE '[❯>▶●•*][[:space:]]*(1[.)][[:space:]]*)?Yes, I trust'
+}
+
+# select_trust_yes — put the caret on "Yes, I trust this folder" and PROVE it is there.
+# Returns 0 only when the caret is verifiably on the accepting option; 1 otherwise.
+#
+# WHY THIS EXISTS, and why it refuses rather than guesses (measured live 2026-09-02, round
+# three). The adapter's Gotchas said "1. Yes, I trust this folder is pre-highlighted, so
+# Enter clears it", and this script believed it. It is not: the dialog defaults to
+# "No, exit". A bare Enter therefore CONFIRMED the exit — Claude quit, the pane fell back to
+# a bash prompt with no agent and no session, the registration gate timed out against a dead
+# pane, and retire refused it as unknown, leaving the pane open. Pressing Enter on an
+# unverified selection is how a canary destroys the thing it is measuring, so this function
+# never presses Enter: it moves and verifies, and the caller only confirms once it returns 0.
+select_trust_yes() {
+  local i=0
+  trust_yes_selected && return 0
+  while [ "$i" -lt "$SMOKE_SELECT_MOVES" ]; do
+    herdr pane send-keys "$PID" Down >/dev/null 2>&1
+    sleep 1
+    trust_yes_selected && return 0
+    i=$((i + 1))
+  done
+  # Down did not move the caret onto it; some builds cycle with Tab instead.
+  i=0
+  while [ "$i" -lt "$SMOKE_SELECT_MOVES" ]; do
+    herdr pane send-keys "$PID" Tab >/dev/null 2>&1
+    sleep 1
+    trust_yes_selected && return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# await_registered <deadline-epoch> — poll `pane get` until herdr has REGISTERED the agent,
+# not merely detected it: `agent` populated AND `agent_session.value` non-empty. Prints the
+# seconds it took; returns 1 on deadline.
+#
+# WHY THIS EXISTS (measured live 2026-09-02, from main). `step_launch` used to wait only for
+# `agent` to be populated, then hand straight to `step_kickoff`. The canary failed 1/7 at
+# kickoff: launch passed with the agent idle after 3s, and `agent prompt` answered
+# `agent_not_found`. herdr screen-detects the agent (publishing `agent`, and enough for
+# `agent wait` to resolve) SEVERAL SECONDS BEFORE it registers the session that `agent prompt`
+# addresses — observed on every launch that day. Waiting on `agent` alone is therefore a race
+# the canary loses on a fast machine, and it reports the lag as a dispatch-path defect when
+# the path is fine. The session id is the positive fact that the agent is addressable, and it
+# is the same field the ledger records and R7 reads.
+#
+# AND IT ANSWERS THE TRUST DIALOG FIRST (measured live 2026-09-02, round two). A brand-new
+# directory raises Claude Code's folder-trust prompt, and herdr publishes NO agent_session
+# while it is up — so a gate that only polled for registration sat through its whole 30s
+# budget staring at an unanswered dialog, failed launch, and left the pane behind. The dialog
+# is therefore polled for on EVERY iteration, not answered once on a fixed delay: it can
+# appear a second or two after the launch line runs, which is exactly when a fixed-delay
+# answer misses it. Registration is only tested once no dialog is showing, so the gate can
+# never mistake a blocked pane for a slow one.
+#
+# Sets two GLOBALS rather than printing: REG_SECS (how long registration took) and
+# DIALOG_ANSWERED. It used to print REG_SECS, which meant the caller read it through a
+# command substitution — a subshell — and DIALOG_ANSWERED never came back, so a launch that
+# answered the dialog reported as if it never had. Returns 0 registered, 1 deadline.
+await_registered() {
+  local deadline=$1 t0 a sid
+  t0=$(date +%s)
+  REG_SECS=0
+  DIALOG_ANSWERED=0
+  DIALOG_STUCK=0
+  CLAUDE_EXITED=0
+  while :; do
+    if trust_dialog_showing; then
+      # NEVER a bare Enter: the dialog defaults to "No, exit" (measured 2026-09-02), so
+      # confirming an unverified selection quits Claude. Move the caret onto the accepting
+      # option, prove it is there, and only then confirm.
+      if select_trust_yes; then
+        herdr pane send-keys "$PID" Enter >/dev/null 2>&1
+        DIALOG_ANSWERED=1
+      else
+        DIALOG_STUCK=1
+        return 1
+      fi
+      [ "$(date +%s)" -ge "$deadline" ] && return 1
+      sleep 2
+      continue
+    fi
+    a=$(pane_field agent)
+    sid=$(pane_field agent_session.value)
+    # Claude gone and a shell in its place: the process exited (the round-three failure, when
+    # Enter confirmed "No, exit"). Fail fast rather than spend the whole budget polling a
+    # dead pane — and say so, because "no session" alone reads as herdr being slow.
+    if { [ -z "$a" ] || [ "$a" = None ]; } && shell_prompt_showing; then
+      CLAUDE_EXITED=1
+      return 1
+    fi
+    if [ -n "$a" ] && [ "$a" != None ] && [ -n "$sid" ] && [ "$sid" != None ]; then
+      REG_SECS=$(( $(date +%s) - t0 )); return 0
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 2
+  done
+}
+
+# --- the steps ---------------------------------------------------------------------------
+step_gate() {                                                                   # R1
+  local pin ver st
+  pin=$(pin)
+  [ -n "$pin" ] || { fail gate "no 'Pinned version:' line in $PIN_FILE"; return 1; }
+  if [ "$DRY" -eq 0 ]; then
+    [ "${HERDR_ENV:-}" = 1 ] || { fail gate "NOT-INSIDE-HERDR (HERDR_ENV is not 1); nothing was run"; return 1; }
+    [ -n "${HERDR_PANE_ID:-}" ] || { fail gate "HERDR_PANE_ID is unset; step_pane opens the worker tab in the FOCUSED workspace, which only a real herdr pane gives it"; return 1; }
+    command -v herdr  >/dev/null 2>&1 || { fail gate "herdr is not on PATH"; return 1; }
+    command -v claude >/dev/null 2>&1 || { fail gate "claude is not on PATH"; return 1; }
+  fi
+  ver=$(herdr --version 2>/dev/null | head -1)
+  [ "$ver" = "herdr $pin" ] || { fail gate "herdr --version says '$ver', the adapter pin is $pin — regenerate the adapter first"; return 1; }
+  st=$(herdr status 2>&1)
+  printf '%s' "$st" | grep -qiE 'compatible["]?:? *(yes|true)' \
+    || { fail gate "herdr status does not say compatible: yes — $(printf '%s' "$st" | tr '\n' ' ' | cut -c1-160)"; return 1; }
+  [ -x "$HOOK" ] || { fail gate "$HOOK is missing or not executable"; return 1; }
+  if [ "$DRY" -eq 0 ]; then
+    hooks_registered || { fail gate "no Stop hook ending in worker-stop.sh in $HOME/.claude/settings.json — run init-shepherd step 4"; return 1; }
+    pass gate "herdr $pin, compatible; Stop hook registered; claude on PATH"
+  else
+    pass gate "herdr $pin (stub), compatible; hook $HOOK (dry-run)"
+  fi
+}
+
+step_pane() {                                                                   # R2
+  local out
+  # A tab, not a split of the shepherd's own pane: five splits leave worker panes ~35
+  # columns wide and truncate the ctx status line (T-0256; Saket's ruling, 2026-09-08).
+  # One call returns the tab and its root pane; --workspace is omitted when the variable
+  # is unset, and herdr falls back to the focused workspace.
+  out=$(herdr tab create ${HERDR_WORKSPACE_ID:+--workspace "$HERDR_WORKSPACE_ID"} --cwd "$WORK" --label w-smoke --no-focus 2>&1)
+  PID=$(printf '%s' "$out" | jget result.root_pane.pane_id)
+  [ -n "$PID" ] || { fail pane "tab create returned no root_pane.pane_id: $(printf '%s' "$out" | cut -c1-200)"; return 1; }
+  herdr pane rename "$PID" w-smoke >/dev/null 2>&1 || true
+  pass pane "$PID (w-smoke), root pane of a new unfocused tab"
+}
+
+step_launch() {                                                                 # R3
+  local t0 deadline a st rem
+  herdr pane run "$PID" "cd $WORK && SHEPHERD_TASK_ID=$SMOKE_ID SHEPHERD_STATUS_FILE=$STATUS CLAUDE_CODE_SUBAGENT_MODEL=$SMOKE_MODEL claude -n worker-$SMOKE_ID --model $SMOKE_MODEL --effort $SMOKE_EFFORT --permission-mode auto" >/dev/null 2>&1
+  t0=$(date +%s); deadline=$((t0 + SMOKE_READY))
+  # herdr detects the agent a few seconds after launch, and `agent wait` on an undetected
+  # agent returns agent_not_found at once (adapter Gotchas) — so poll pane get first, and
+  # wait for REGISTRATION (agent_session), not just detection: see await_registered.
+  await_registered "$((t0 + SMOKE_REGISTER))" || {
+    if [ "${CLAUDE_EXITED:-0}" = 1 ]; then
+      fail launch "claude exited and left a shell on $PID$([ "${DIALOG_ANSWERED:-0}" = 1 ] && printf ' after the trust dialog was answered') — the worker is gone, nothing was run — pane: $(pane_tail)"
+    elif [ "${DIALOG_STUCK:-0}" = 1 ]; then
+      fail launch "could not put the caret on 'Yes, I trust this folder' in ${SMOKE_SELECT_MOVES} moves each of Down and Tab; refused to confirm an unverified option because the dialog defaults to 'No, exit' — pane: $(pane_tail)"
+    elif trust_dialog_showing; then
+      fail launch "the folder-trust dialog is still on screen after ${SMOKE_REGISTER}s of answering it; herdr publishes no agent_session while it is up — pane: $(pane_tail)"
+    else
+      fail launch "herdr never registered an agent on $PID within ${SMOKE_REGISTER}s (agent=$(pane_field agent), agent_session=$(pane_field agent_session.value)) — pane: $(pane_tail)"
+    fi
+    return 1; }
+  a=$(pane_field agent)
+  rem=$((deadline - $(date +%s))); [ "$rem" -lt 5 ] && rem=5
+  herdr agent wait "$PID" --until idle --until blocked --timeout $((rem * 1000)) >/dev/null 2>&1
+  st=$(pane_field agent_status)
+  if [ "$st" = blocked ]; then
+    # The gate above already answers the folder-trust dialog, so a dialog still here is a
+    # late one; answer it the same way and re-check. Anything else is a genuine block.
+    if trust_dialog_showing; then
+      herdr pane send-keys "$PID" Enter >/dev/null 2>&1
+      herdr agent wait "$PID" --until idle --timeout 30000 >/dev/null 2>&1
+      DIALOG_ANSWERED=1
+      st=$(pane_field agent_status)
+      [ "$st" = idle ] || { fail launch "still '$st' after answering the trust dialog — pane: $(pane_tail)"; return 1; }
+    else
+      fail launch "agent blocked on an unexpected dialog — pane: $(pane_tail)"; return 1
+    fi
+  fi
+  [ "$st" = idle ] || { fail launch "agent_status is '$st' after ${SMOKE_READY}s, expected idle — pane: $(pane_tail)"; return 1; }
+  pass launch "$a $SMOKE_MODEL/$SMOKE_EFFORT idle after $(( $(date +%s) - t0 ))s, registered after ${REG_SECS}s$([ "${DIALOG_ANSWERED:-0}" = 1 ] && printf ' (trust dialog answered)')"
+}
+
+step_kickoff() {                                                                # R4
+  local out code try=1
+  # agent_not_found here is a RACE, not a lost agent (measured live 2026-09-02): herdr can
+  # answer it for seconds after the session is registered. await_registered removes most of
+  # the window; these retries cover the rest. Only the last attempt fails the step.
+  while :; do
+    out=$(herdr agent prompt "$PID" "$TASK_LINE" --wait --until working --timeout 15000 2>&1)
+    code=$(printf '%s' "$out" | python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+e=d.get("error") or {}
+print(e.get("code") or (d.get("result") or {}).get("type") or "")' 2>/dev/null)
+    [ "$code" = agent_not_found ] || break
+    [ "$try" -ge "$SMOKE_KICKOFF_TRIES" ] && break
+    try=$((try + 1))
+    sleep "$SMOKE_KICKOFF_BACKOFF"
+  done
+  case "$code" in
+    agent_blocked)   fail kickoff "agent_blocked: the worker has a dialog open — pane: $(pane_tail)"; return 1 ;;
+    agent_not_found) fail kickoff "agent_not_found after $try attempt(s) over ~$(( (try - 1) * SMOKE_KICKOFF_BACKOFF ))s: herdr never made the agent on $PID addressable — pane: $(pane_tail)"; return 1 ;;
+  esac
+  [ "$try" -gt 1 ] && pass kickoff "one-line task submitted (${code:-no code returned}) on attempt $try after agent_not_found; the status file decides" && return 0
+  # agent_prompt_stalled / timeout are not failures: a fast worker may finish inside the
+  # wait, and the status file — never this return value — is the evidence (R4, R5).
+  pass kickoff "one-line task submitted (${code:-no code returned}); the status file decides"
+}
+
+step_claim() {                                                                  # R5
+  local PAT='"claim": "\(done\|blocked\|failed\)"' n t0 deadline st last i=0 lastclaim
+  t0=$(date +%s); deadline=$((t0 + SMOKE_WAIT))
+  while :; do
+    n=$(grep -c "$PAT" "$STATUS" 2>/dev/null); n=${n:-0}
+    [ "$n" -gt 0 ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      # Report the claim FIELD, not a truncated record: the hook's line carries a
+      # transcript path long enough to push `claim` past any sane cut.
+      lastclaim=$(last_field claim); last=$(tail -n 1 "$STATUS" 2>/dev/null | cut -c1-120)
+      fail claim "no terminal claim in $(basename "$STATUS") after ${SMOKE_WAIT}s — last record's claim: '${lastclaim:-<no records>}'; record starts: ${last:-<none>}; pane: $(pane_tail)"; return 1
+    fi
+    # Every 5th poll (~10 s): a worker parked on a permission prompt never writes a Stop
+    # record, so the window would burn for nothing — the R5 stall watcher, folded in.
+    i=$((i + 1))
+    if [ $((i % 5)) -eq 0 ]; then
+      st=$(pane_field agent_status)
+      [ "$st" = blocked ] && { fail claim "worker blocked on a prompt before claiming — pane: $(pane_tail)"; return 1; }
+    fi
+    sleep 2
+  done
+  CLAIM=$(last_field claim)
+  pass claim "$CLAIM after $(( $(date +%s) - t0 ))s ($n terminal record(s) in $(basename "$STATUS"))"
+}
+
+step_verify() {                                                                 # R7 + DoD
+  local ev task claim sid tp pm psid content problems=""
+  ev=$(last_field event); task=$(last_field task); claim=$(last_field claim)
+  sid=$(last_field session_id); tp=$(last_field transcript_path); pm=$(last_field permission_mode)
+  [ "$ev" = stop ]          || problems="$problems event=$ev;"
+  [ "$task" = "$SMOKE_ID" ] || problems="$problems task=$task;"
+  [ "$claim" = done ]       || problems="$problems claim=$claim;"
+  [ -n "$sid" ]             || problems="$problems session_id empty;"
+  { [ -n "$tp" ] && [ -f "$tp" ]; } || problems="$problems transcript_path=${tp:-empty} is not a file;"
+  [ "$pm" = auto ]          || problems="$problems permission_mode=$pm;"
+  psid=$(pane_field agent_session.value)
+  { [ -n "$sid" ] && [ "$psid" = "$sid" ]; } || problems="$problems hook session '$sid' != pane session '$psid';"
+  if [ ! -f "$WORK/smoke-ok.txt" ]; then
+    problems="$problems smoke-ok.txt missing (the claim said done);"
+  else
+    content=$(tr -d '[:space:]' < "$WORK/smoke-ok.txt" 2>/dev/null || true)
+    [ "$content" = ok ] || problems="$problems smoke-ok.txt reads '$content', expected ok;"
+  fi
+  [ -z "$problems" ] || { fail verify "${problems# }"; return 1; }
+  pass verify "stop record for $SMOKE_ID: claim done, session $sid matches the pane, transcript on disk, permission_mode auto; smoke-ok.txt reads ok"
+}
+
+step_retire() {                                                                 # R9
+  local label st foc tid pc tab cleared=""
+  [ -n "$PID" ] || { skip retire "no pane was created"; return 0; }
+  label=$(pane_field label); st=$(pane_field agent_status); foc=$(pane_field focused)
+  case "$label" in w-*) ;; *) fail retire "guard: label '$label' does not start with w- — pane $PID left open"; return 1 ;; esac
+
+  # A pane blocked on the folder-trust dialog is THIS CANARY'S OWN PANE, on a temp directory
+  # it created, running a worker it launched — not an operator's session to be preserved.
+  # R9's "never close a blocked agent" guard exists to protect someone else's work, and it
+  # was doing the opposite here: measured live 2026-09-02, a launch that failed with the
+  # dialog still up left the pane open for the operator to close by hand. Escape cancels the
+  # dialog (adapter Gotchas), then the state is RE-READ — never assumed — before the guards
+  # below judge it. The label check above has already proved the pane is ours.
+  if [ "$st" = blocked ] && trust_dialog_showing; then
+    herdr pane send-keys "$PID" Escape >/dev/null 2>&1
+    sleep 2
+    st=$(pane_field agent_status); foc=$(pane_field focused)
+    cleared=" after clearing the trust dialog"
+  fi
+
+  # A pane with NO agent, sitting at a shell, is this canary's own dead pane: the worker it
+  # launched exited and left the shell behind. Measured live 2026-09-02 (round three), where
+  # a confirmed "No, exit" quit Claude and retire then refused the pane as `unknown` and left
+  # it open for the operator. `unknown` means herdr cannot classify what is in the pane — it
+  # is not a claim that someone else's agent is working there, and the label check above has
+  # already proved the pane is ours. An empty agent plus a shell prompt is positive evidence
+  # that nothing is running, so the pane is closed rather than abandoned.
+  local agent_now
+  agent_now=$(pane_field agent)
+  if { [ -z "$agent_now" ] || [ "$agent_now" = None ]; } && shell_prompt_showing; then
+    case "$st" in
+      idle|done|None|"") ;;
+      *) st=None; cleared="$cleared — no agent and a shell prompt, so the canary's own pane is dead" ;;
+    esac
+  fi
+
+  case "$st" in idle|done|None|"") ;; *) fail retire "guard: agent_status is '$st'$cleared (never close a working/blocked agent) — pane $PID left open"; return 1 ;; esac
+  case "$foc" in False|false|None|"") ;; *) fail retire "guard: pane $PID is focused (the operator is looking at it) — left open"; return 1 ;; esac
+  # R9's last guard: the tab retires with its only pane, so read pane_count before
+  # closing. Above 1, someone else's pane shares the tab and only ours goes.
+  tid=$(pane_field tab_id); pc=$(herdr tab get "$tid" 2>/dev/null | jget result.tab.pane_count)
+  herdr pane close "$PID" >/dev/null 2>&1 || { fail retire "pane close $PID failed"; return 1; }
+  case "$pc" in
+    1) tab=", tab $tid with it" ;;
+    "") tab=", tab unread ($tid)" ;;
+    *) tab=", tab $tid left standing ($pc panes)" ;;
+  esac
+  pass retire "pane $PID closed$cleared$tab (label $label, agent ${st:-absent}, unfocused)"
+}
+
+# --- run ---------------------------------------------------------------------------------
+main() {
+  local s ok=1 tag=""
+  [ "$DRY" -eq 1 ] && tag=" (dry-run)"
+  for s in gate pane launch kickoff claim verify; do
+    if [ "$ok" -eq 1 ]; then "step_$s" || ok=0
+    else skip "$s" "after FAIL at $FAILED_AT"; fi
+  done
+  step_retire || true
+  if [ "$FAILED" -eq 0 ]; then
+    rm -rf "$TMP"
+    printf 'smoke: PASS %d/7%s\n' "$PASSED" "$tag"
+    return 0
+  fi
+  if [ -z "$PID" ]; then
+    rm -rf "$TMP"                                  # nothing was created; keep no litter
+    printf 'smoke: FAIL %d/7 failed at %s%s\n' "$FAILED" "$FAILED_AT" "$tag"
+  else
+    printf 'smoke: FAIL %d/7 failed at %s — kept %s%s\n' "$FAILED" "$FAILED_AT" "$TMP" "$tag"
+  fi
+  return 1
+}
+main

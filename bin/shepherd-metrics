@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# shepherd-metrics — the introspection numbers (docs/reports/2026-09-02-introspection.md §2)
+# recomputed from the ledger. Read-only; never writes.
+#
+#   shepherd-metrics week                  cards created in the 7 days up to --now
+#   shepherd-metrics since <YYYY-MM-DD>    cards created on or after that day (local midnight),
+#                                    up to --now
+#   shepherd-metrics all                   every card created up to --now
+#   options:  --json                 one JSON object on stdout instead of the table
+#             --now <iso8601>        the window's right edge, and the instant that closes a
+#                                    still-open interval (default: now); makes runs
+#                                    reproducible
+#
+# Root: SHEPHERD_ROOT (lib/shepherd-common.sh). Memory index: SHEPHERD_MEMORY_INDEX,
+# else ~/.claude/projects/<root with / replaced by ->/memory/MEMORY.md.
+#
+# The card set is the filter: every card-derived measure runs over the selected cards,
+# status files join by task id, decisions filter by month overlapping the window, and
+# the always-loaded context is point-in-time. Data a card lacks is counted in that
+# measure's `missing` column, never guessed.
+#
+# `--now` bounds WHEN, not WHAT. Wherever the ledger records a time, nothing later than
+# `--now` is counted, in any mode, `all` included. Four sources carry a time and all four
+# are cut at it: a card's `created:`, a status event's `ts`, a git transition's commit
+# date, and a decision file's YYYY-MM month. What straddles the edge is clipped to it
+# rather than dropped — an active interval still open at `--now`, and a blocked event
+# whose unblocking stop lands after it — so a numerator and its denominator span the same
+# window.
+#
+# It does NOT rewind the ledger's contents. Everything a card or a decision states without
+# a time is read as it stands TODAY: a card's `state:` line, and its `project:`, `size:`
+# and `budget:`; the `## Log` metrics line behind measured work, the tail and wakes; the
+# entries inside a decision month the edge kept; and the always-loaded context, which is
+# the files on disk now. Two consequences worth naming, because rows show them: a card
+# that was `briefed` at the edge and closed that night is counted `done`, with its
+# close-out duration and wakes in full, and every `missing` bucket that asks "is this card
+# done?" asks it of today's state. `status_files` and `files` are unwindowed for a
+# different reason — they count files, which carry no time at all (see `worker turns`).
+#
+# So a backdated run reports the cards, events, transitions and decision months that
+# EXISTED at that instant, carrying their present-day state and close-out numbers. It
+# recomputes a window; it is not a snapshot of the past.
+#
+# Definitions (two people must compute the same number):
+#   cards          count by `state:`; headline done / failed / abandoned. Self-maintenance =
+#                  the whole shepherd family — `shepherd`, `shepherd~N`, the retired
+#                  `shepherd (self)` spelling, and any `shepherd-<name>` such as
+#                  `shepherd-template`, `shepherd-deck`, `shepherd-inbox`. All of it is the
+#                  orchestrator working on itself and its own tooling, as opposed to the
+#                  operator's business projects; the 2026-09-02 report's 15 % row counts the
+#                  same set. Missing: a card with no `state:` line, and — counted over the
+#                  whole ledger, so identical in every mode — one whose `created:` cannot be
+#                  read, which belongs to no window and so is selected in none.
+#   measured work  the last `## Log` line whose first non-blank character is `-` or a digit and
+#                  that carries `metrics:` — this covers `- HH:MM metrics:`, the bare
+#                  `HH:MM metrics:` of CLAUDE.md §5, `- metrics:` with no timestamp, and a
+#                  `metrics:` that follows other text on the line. Duration is searched for in
+#                  the text AFTER `metrics:`, so a `duration` earlier on the line is invisible:
+#                  it is the first NhNm token after the word `duration` there, else the first
+#                  token there, i.e. the wall-clock retro wrote. Decimal hours and `2h 30m` are
+#                  read, a trailing Ns is dropped, and anything else lands in
+#                  unparsable_duration rather than a guess. Budget = `budget: NNNm`.
+#                  Ratio = duration/budget; overrun = ratio > 1; rate per size. Missing: done
+#                  card without a metrics line, no parsable duration, unparsable budget.
+#   tail           the five highest ratios, their hours, and their share of measured work.
+#                  It has no top-level `--json` key of its own: it is `worst`,
+#                  `worst_hours` and `worst_share_pct` inside `timed`.
+#   wakes          the `wakes N` figure on the same metrics line, where N may carry a `~` or
+#                  `≈` prefix. The row prints the total, the mean per card that has a figure,
+#                  and the card with the most. (Log wake lines are not counted: heartbeats
+#                  stopped being logged individually mid-August.) Missing: a done card with no
+#                  metrics line, and a metrics line with no `wakes` figure.
+#   worker turns   `stop` events stamped on or before `--now`, across every status file of
+#                  a task. A task's turns can be spread over rotated files — the task id
+#                  followed by a suffix, `T-0041.block7.jsonl`, `T-0059.done.jsonl` — and a
+#                  large minority of the live folder is one of those; all of a task's files
+#                  are read and merged into one stream ordered by `ts`. An event whose `ts`
+#                  cannot be read sorts last and is still counted, because it can be placed
+#                  on neither side of the edge. Reports the `claim: none` share and a
+#                  per-claim histogram. `status_files` and `files` are the exception to the
+#                  window: they count FILES, not events, and a file carries no time, so both
+#                  are totals over every file of every selected card — a backdated run can
+#                  report more files than it counted events in. Missing: a done card with no
+#                  status file at all, and a status-file line that is not a readable JSON
+#                  object.
+#   blocked        events = `stop` events with claim `blocked` stamped on or before `--now`.
+#                  Duration = to the next `stop` in that task's merged stream, clipped to
+#                  `--now`. Unclipped it is an UPPER BOUND: it includes the unblocking
+#                  turn's own work. Clipped it is the opposite — the block was still open
+#                  at the edge and ran on past it, so the figure is below its true length,
+#                  and a block opening exactly at `--now` is timed at zero minutes.
+#                  Missing: a block with no later stop (open, or the worker was relaunched
+#                  without the hook), which is where a block whose own `ts` cannot be read
+#                  lands too, since such an event sorts last and so finds no later stop; and
+#                  `unparsable_ts`, a block whose closing stop carries a `ts` that cannot
+#                  be read. Share = blocked hours / `active_hours` (defined under
+#                  concurrency), both sides over the same window. The
+#                  one-liner is the text after the LAST `SHEPHERD: blocked —` sentinel in
+#                  the claim's tail, or the tail's last 200 characters when the claim
+#                  carries no sentinel. Cause class from that one-liner, first match wins:
+#                  design-approval (approv, design, plan, spec, checkpoint, brainstorm) ·
+#                  question (question, answer, ask — matched at a word start, so `task` is
+#                  not a question — clarif, ruling, decid) · permission (permission, login,
+#                  auth, credential, token, access) ·
+#                  operator-action (wait, await, feedback, confirm, consent, disposition,
+#                  your — the whole word — human) · other, which means unclassified — read
+#                  those cards.
+#                  human = every block whose one-liner names a person's act (a decision, an
+#                  answer, a credential, or simply waiting on the operator): everything but
+#                  `other`.
+#                  The report's row (77 events, 55.9 h, mean 152 m) is internally
+#                  inconsistent — 77 × 152 m ≈ 195 h — so no definition reproduces it.
+#   inbox          `ledger/inbox.log` (docs/specs/2026-09-07-linear-conversation-design.md §7;
+#                  written by `shepherd-inbox log`), two line shapes: `<drain-start>
+#                  <event-id> <session> <kind> <intent> <trust> <outcome> <received-at>
+#                  <first-word-at>`, and `answered <event-id> <answer-at>`. An event is
+#                  selected by its drain-start — in the window and on or before `--now` —
+#                  and counted by intent, by outcome (`carded:T-NNNN` counts as `carded`)
+#                  and by trust word. First-word time = first-word-at − drain-start, counted
+#                  only when the first word is on or before `--now`; a later one is
+#                  `first_word_after_now`. Answer time, also from drain-start: the newest
+#                  `answered` line naming the event and stamped on or before `--now`, else
+#                  the first word itself when the outcome is `answered` or `refused` — a
+#                  refusal is a final word (spec §3 rule 3); `asked` and `ignored` have none,
+#                  and a `carded`, `routed` or `held` event with no answered line yet is
+#                  `unclosed`. Medians per intent and overall, in minutes to one decimal.
+#                  The offline gap = drain-start − received-at (the Worker's `received_at`),
+#                  reported as its own median and max and never folded into either latency:
+#                  it measures how long the box was away, not how fast the drain answered.
+#                  Missing: `log` 1 when the file is absent, every other number zero;
+#                  `unparsable_lines`, a non-blank line that is neither shape — wrong
+#                  column count, a trust or outcome word outside the vocabulary, a
+#                  drain-start or answer-at that is not a time — counted in every mode,
+#                  since such a line belongs to no window; `unparsable_ts`, a selected event
+#                  whose received-at or first-word-at cannot be read (its other numbers
+#                  still count); `answered_without_event`, an answered line inside the
+#                  window whose event no line records, while one whose event lies outside
+#                  the window is ignored; `unclosed`; `first_word_after_now`; `negative`, a
+#                  received-at after its drain-start, or a first word or answer before it —
+#                  a clock behind the Worker's, or a hand-written line — counted and kept out
+#                  of every median. An answered
+#                  line joins EVERY event line with its id: a request drained twice is two
+#                  events, and one answer closes both.
+#   concurrency    active = briefed | working | blocked | review, so this counts active
+#                  CARDS, not live workers: a card left `briefed` is active until its next
+#                  transition, and the peak can exceed the operator's worker cap. A card's
+#                  active intervals come from git (`git log -p --reverse -- ledger/tasks/`):
+#                  the commit whose diff adds `+state: <active>` opens one, the next commit
+#                  adding a non-active state closes it, or `--now` does; a span that opens
+#                  and closes in the same second is dropped, and a commit authored after
+#                  `--now` is not read at all. Only the SELECTED cards are read, so `week`
+#                  and `since` move the window: `from` is the hour containing the earliest
+#                  selected interval, `total_hours` the ceil of the span to
+#                  `--now` (the last bucket may be partial), and an hour counts every card
+#                  active at any point inside it — 0 / 1 / 2 / 3+, with `max` and
+#                  `hours_at_max` naming the peak. `active_hours` is the sum of those
+#                  intervals clipped to the window, and it is the denominator of the
+#                  `blocked` share above. Missing: `done_without_dated_interval`, done cards
+#                  with no dated active interval, and `git_unavailable`, 1 when git cannot
+#                  answer at all — both keys are always present, so the JSON shape does not
+#                  change with the branch taken.
+#   decisions      entries = `## ` headers in decisions/YYYY-MM*.md; the month is the
+#                  filename's YYYY-MM prefix, so `TEMPLATE.md` is not a decision log. The
+#                  window is month-granular: `week` and `since` keep every month that
+#                  overlaps, so a `since` inside a month counts that whole month, and no
+#                  month later than `--now`'s own month is counted, in any mode. A label is
+#                  `Decision`, `Basis`, `Confidence`, `Outcome`, `Context` or `By` at the
+#                  start of a line or after a `**`, followed by `:`, `.`, a number or a dash
+#                  — so a bolded label mid-line counts, and so does an unbolded one right
+#                  after a closed bold run, while the same word in prose does not. A label's
+#                  text runs to the next label. Basis present = a Basis label. Outcome
+#                  backfilled = an Outcome label whose text is none of the placeholders: the
+#                  empty string, —, -, pending, tbd, open, n/a. Placeholders are matched
+#                  case-insensitively and the text is stripped of `— – - * :` first, so
+#                  `Pending`, `**` and a bare colon all count as placeholders. Live source
+#                  cited = the Basis text holds http(s)://, ctx7, `read|verified|checked|as
+#                  of <YYYY-MM-DD>`, or a domain path whose suffix is one of com dev app io
+#                  org net ai — those seven and no others, because a permissive
+#                  `domain.tld/path` adds exactly one entry over the live corpus and that
+#                  entry is a false positive, `DESIGN.md/` read as a domain. A percentage is
+#                  null, not 0.0, when the window holds no entries. Missing: entries with no
+#                  Basis label.
+#   context        tokens = ceil(bytes / 4) for CLAUDE.md, the memory index, the wake skill
+#                  and the adapter reference. Each absent file is counted in missing and
+#                  contributes nothing, so total_tokens covers only the files that exist and
+#                  is NOT the sum of all four when one is absent. The memory index is the
+#                  root-derived path above unless SHEPHERD_MEMORY_INDEX names it. A run from
+#                  a worktree lane needs nothing set: the path is derived from SHEPHERD_ROOT,
+#                  the base checkout (lib/shepherd-common.sh), not from the lane's own
+#                  directory — and every shepherd-wt* worktree shares the base checkout's
+#                  memory dir anyway (registry `memory-dir:`, T-0220). The variable is for a
+#                  root whose index sits elsewhere. The adapter reference measured is the
+#                  highest-versioned references/v*.md, not a fixed filename: CLAUDE.md §7's
+#                  pin moves and the older files stay beside it.
+set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/shepherd-common.sh"
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+
+mode="" since="" ; args=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    --json) args+=(--json) ;;
+    --now)
+      [ $# -ge 2 ] || { echo "ERROR: --now needs a value" >&2; exit 2; }
+      args+=(--now "$2"); shift ;;
+    week|all)
+      [ -z "$mode" ] || { echo "ERROR: one mode only" >&2; exit 2; }
+      mode=$1 ;;
+    since)
+      [ -z "$mode" ] || { echo "ERROR: one mode only" >&2; exit 2; }
+      [ $# -ge 2 ] || { echo "ERROR: since needs a date" >&2; exit 2; }
+      mode=since; since=$2; shift ;;
+    *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+[ -n "$mode" ] || { usage >&2; exit 2; }
+command -v python3 >/dev/null || { echo "ERROR: python3 is required" >&2; exit 2; }
+
+set -- --root "$SHEPHERD_ROOT" --memory-index "${SHEPHERD_MEMORY_INDEX:-}" "$mode"
+[ -n "$since" ] && set -- "$@" "$since"
+exec python3 "$HERE/../lib/metrics.py" "$@" "${args[@]}"

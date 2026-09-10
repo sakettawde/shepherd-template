@@ -1,0 +1,88 @@
+#!/bin/sh
+# shepherd-init — the mechanical half of /shepherd:init. Two verbs:
+#
+#   shepherd-init seed     [--dir <instance-dir>]
+#       Copy the instance skeleton (templates/instance/) into <instance-dir>:
+#       the thin CLAUDE.md, .shepherd/instance.env, .claude/settings.json,
+#       .gitignore and the empty ledger/ registry/ decisions/ trees. NEVER
+#       overwrites: a file that already exists is reported and left alone, so
+#       a re-run on a live instance is safe.
+#
+#   shepherd-init registry <code-dir> [--dir <instance-dir>]
+#       Add an index row to <instance-dir>/registry/projects.md for every
+#       project directory not yet listed. Idempotent: existing rows and their
+#       hand-enriched keywords are never touched. Cards are created at
+#       onboarding; the index alone is enough to route and gate.
+#
+# <instance-dir> defaults to the git top level of the working directory, else
+# the working directory. It is deliberately NOT lib/shepherd-common.sh's
+# SHEPHERD_ROOT: that resolver refuses without .shepherd/instance.env, which is
+# exactly the file `seed` exists to create.
+#
+# Self-locating from $0: a plugin bin/ script gets no CLAUDE_PLUGIN_ROOT.
+set -eu
+
+PLUGIN_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+SKEL="$PLUGIN_ROOT/templates/instance"
+
+usage() {
+  echo "usage: shepherd-init seed [--dir <instance-dir>]" >&2
+  echo "       shepherd-init registry <code-dir> [--dir <instance-dir>]" >&2
+  exit 2
+}
+
+verb=${1:-}; [ $# -gt 0 ] && shift || usage
+CODE_DIR=""
+DIR=""
+case "$verb" in
+  seed) ;;
+  registry) [ $# -gt 0 ] || usage; CODE_DIR=${1%/}; shift ;;
+  *) usage ;;
+esac
+while [ $# -gt 0 ]; do
+  case $1 in
+    --dir) DIR=${2:-}; [ -n "$DIR" ] || usage; shift 2 ;;
+    *) usage ;;
+  esac
+done
+if [ -z "$DIR" ]; then
+  DIR=$(git rev-parse --show-toplevel 2>/dev/null) || DIR=$PWD
+fi
+[ -d "$DIR" ] || { echo "not a directory: $DIR" >&2; exit 2; }
+
+if [ "$verb" = seed ]; then
+  [ -d "$SKEL" ] || { echo "plugin has no templates/instance skeleton at $SKEL" >&2; exit 1; }
+  created=0; kept=0
+  # -print0 would be nicer, but this stays POSIX sh and the skeleton has no
+  # path with a space or a newline in it.
+  for rel in $(cd "$SKEL" && find . -type f | sed 's|^\./||' | sort); do
+    dst="$DIR/$rel"
+    if [ -e "$dst" ]; then
+      echo "  kept    $rel"
+      kept=$((kept + 1))
+    else
+      mkdir -p "$(dirname "$dst")"
+      cp "$SKEL/$rel" "$dst"
+      echo "  created $rel"
+      created=$((created + 1))
+    fi
+  done
+  echo "seeded $DIR: $created created, $kept kept"
+  [ "$created" -gt 0 ] && echo "Edit .shepherd/instance.env: every CHANGE-ME is yours to fill."
+  exit 0
+fi
+
+[ -d "$CODE_DIR" ] || { echo "not a directory: $CODE_DIR" >&2; exit 2; }
+REG="$DIR/registry/projects.md"
+[ -f "$REG" ] || { echo "no registry at $REG; run 'shepherd-init seed' first" >&2; exit 1; }
+added=0
+for d in "$CODE_DIR"/*/; do
+  [ -d "$d" ] || continue
+  [ "$(CDPATH= cd -- "$d" && pwd -P)" = "$DIR" ] && continue
+  slug=$(basename "$d")
+  esc=$(printf '%s' "$slug" | sed 's/[][\.*^$]/\\&/g')
+  grep -q "^| $esc |" "$REG" && continue
+  printf '| %s | %s | no | %s |\n' "$slug" "${d%/}" "$slug" >> "$REG"
+  added=$((added + 1))
+done
+echo "added $added rows; total $(grep -c '^| ' "$REG") (incl. header)"

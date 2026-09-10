@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# shepherd-manual check|sync [--dir <instance-dir>]
+#
+# The framework manual ships in the plugin as manual/shepherd.md. An instance
+# carries a GENERATED, COMMITTED copy at .claude/shepherd-manual.md, which its
+# thin CLAUDE.md imports. This command is the one place that compares the two.
+#
+#   check  prints one state word on stdout and exits 0:
+#            current    the copy matches the installed plugin and git is clean
+#            refreshed  the copy matches, but git reports it dirty or untracked
+#                       — the SessionStart hook just wrote it, and a wake step
+#                       owes it a commit through shepherd-commit
+#            stale      base checkout, copy differs from the plugin's manual
+#            lane-stale a worktree lane whose committed copy differs; the lane
+#                       is read-only for this file, so this is information only
+#            missing    the instance has no copy yet
+#            no-manual  this plugin checkout has no manual/shepherd.md
+#            not-instance  <dir> has no .shepherd/instance.env
+#   sync   writes the copy when it differs, then prints the resulting state.
+#          It REFUSES inside a worktree lane: a generated diff on a task branch
+#          would land in the worker's commit and pollute the merge (T-0218 §2).
+#
+# Self-locating: a plugin bin/ script receives neither CLAUDE_PLUGIN_ROOT nor
+# CLAUDE_PROJECT_DIR (measured 2026-09-10, Claude Code 2.1.267), so $0 is the
+# only anchor. It deliberately does NOT source lib/shepherd-common.sh: in a
+# lane that library resolves to the BASE checkout, and this command must reason
+# about the working copy it was actually run in.
+set -u
+
+HERE=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PLUGIN_ROOT=$(cd -P "$HERE/.." && pwd)
+SRC="$PLUGIN_ROOT/manual/shepherd.md"
+REL=".claude/shepherd-manual.md"
+
+cmd=${1:-}; shift || true
+dir=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --dir) dir=${2:-}; shift 2 ;;
+    *) echo "shepherd-manual: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+case "$cmd" in check|sync) ;; *)
+  echo "usage: shepherd-manual check|sync [--dir <instance-dir>]" >&2; exit 2 ;;
+esac
+
+if [ -z "$dir" ]; then
+  dir=$(git rev-parse --show-toplevel 2>/dev/null) || dir=$PWD
+fi
+[ -d "$dir" ] || { echo "not-instance"; exit 0; }
+
+[ -f "$SRC" ] || { echo "no-manual"; exit 0; }
+[ -f "$dir/.shepherd/instance.env" ] || { echo "not-instance"; exit 0; }
+
+# A worktree lane is where --git-dir and --git-common-dir disagree. The marker
+# alone cannot tell a lane apart: a lane carries the committed instance.env too.
+gd=$(git -C "$dir" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)
+gc=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+in_lane=0
+[ -n "$gd" ] && [ -n "$gc" ] && [ "$gd" != "$gc" ] && in_lane=1
+
+dst="$dir/$REL"
+
+state() {
+  if [ ! -f "$dst" ]; then echo missing; return; fi
+  if ! cmp -s "$SRC" "$dst"; then
+    [ "$in_lane" = 1 ] && { echo lane-stale; return; }
+    echo stale; return
+  fi
+  # Content matches. Dirty or untracked means the hook wrote it this session.
+  local porcelain
+  porcelain=$(git -C "$dir" status --porcelain -- "$REL" 2>/dev/null)
+  if [ -n "$porcelain" ]; then echo refreshed; else echo current; fi
+}
+
+if [ "$cmd" = check ]; then
+  state
+  exit 0
+fi
+
+# sync
+if [ "$in_lane" = 1 ]; then
+  echo "shepherd-manual: refusing to write inside a worktree lane ($dir); the base checkout owns the generated copy" >&2
+  state
+  exit 1
+fi
+if [ "$(state)" = current ] || [ "$(state)" = refreshed ]; then
+  state
+  exit 0
+fi
+mkdir -p "$(dirname "$dst")" || { echo "shepherd-manual: cannot create $(dirname "$dst")" >&2; exit 1; }
+tmp=$(mktemp "$(dirname "$dst")/.shepherd-manual.XXXXXX") || exit 1
+if ! cp "$SRC" "$tmp"; then rm -f "$tmp"; echo "shepherd-manual: copy failed" >&2; exit 1; fi
+mv -f "$tmp" "$dst" || { rm -f "$tmp"; echo "shepherd-manual: install failed" >&2; exit 1; }
+state
+exit 0

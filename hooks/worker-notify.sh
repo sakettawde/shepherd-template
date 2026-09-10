@@ -1,64 +1,44 @@
 #!/bin/sh
 # shepherd worker Notification hook — logs every notification to the task's
-# status file (waking shepherd's watcher within ~2s) and raises a herdr toast
-# for the kinds that actually need the operator (see the allowlist below).
-# Registered user-globally; no-op for sessions without shepherd env vars.
+# status file (waking shepherd's watcher within ~2s for the parked-worker
+# kinds, shepherd-watch) and raises a herdr toast for the kinds that need the
+# operator (see the allowlist below). Registered user-globally; no-op for
+# sessions without shepherd env vars. The record is written by
+# lib/worker_notify.py; a failure to record is itself recorded (lib/run-hook.sh).
 [ -n "${SHEPHERD_TASK_ID:-}" ] || exit 0
 [ -n "${SHEPHERD_STATUS_FILE:-}" ] || exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
+HERE=$(cd "$(dirname "$0")" && pwd)
 
-hook_input="$(mktemp "${TMPDIR:-/tmp}/shepherd-notify.XXXXXX")" || exit 0
-kind_file="$(mktemp "${TMPDIR:-/tmp}/shepherd-notify-kind.XXXXXX")" || exit 0
-trap 'rm -f "$hook_input" "$kind_file"' EXIT HUP INT TERM
-cat >"$hook_input" 2>/dev/null || true
+# `.` on an unreadable file aborts a POSIX shell outright - dash exits 2, and a
+# Stop hook on this same wrapper shape exiting 2 would BLOCK the worker's turn.
+# So the missing library is reported the only way still available - a hand-built
+# record, no helpers, with the same status-file-then-sidecar ladder
+# shepherd_status.hook_error uses - and the hook exits 0 like every other path
+# here. The sidecar arm is not decoration: the status file being unwritable is
+# exactly when a watcher can never fire, and without it that outage is silent.
+if [ -r "$HERE/lib/run-hook.sh" ]; then
+  . "$HERE/lib/run-hook.sh"
+else
+  now=$(date +%Y-%m-%dT%H:%M:%S%z)
+  msg="hooks/lib/run-hook.sh is missing; nothing recorded"
+  # The library's pair check, made here by hand: a task id that is not this
+  # file's own writes nothing into it, on this path as on every other (T-0223).
+  [ "${SHEPHERD_STATUS_FILE##*/}" = "$SHEPHERD_TASK_ID.jsonl" ] || { printf '%s notify SHEPHERD_TASK_ID %s is not the task of %s (expected basename %s.jsonl); %s\n' "$now" "$SHEPHERD_TASK_ID" "$SHEPHERD_STATUS_FILE" "$SHEPHERD_TASK_ID" "$msg" >>"$SHEPHERD_STATUS_FILE.err" 2>/dev/null; exit 0; }
+  printf '{"ts": "%s", "event": "hook_error", "task": "%s", "kind": "notify", "message": "%s"}\n' \
+    "$now" "$SHEPHERD_TASK_ID" "$msg" >>"$SHEPHERD_STATUS_FILE" 2>/dev/null \
+    || printf '%s notify %s\n' "$now" "$msg" >>"$SHEPHERD_STATUS_FILE.err" 2>/dev/null
+  exit 0
+fi
 
-SHEPHERD_HOOK_INPUT="$hook_input" SHEPHERD_KIND_FILE="$kind_file" python3 - <<'PY' 2>/dev/null || true
-import json, os, time
+kind=$(shepherd_hook_run notify "$HERE/lib/worker_notify.py")
 
-data = {}
-try:
-    with open(os.environ["SHEPHERD_HOOK_INPUT"], encoding="utf-8") as fh:
-        content = fh.read()
-    if content.strip():
-        data = json.loads(content)
-except Exception:
-    data = {}
-
-kind = data.get("notification_type") or data.get("matcher") or data.get("hook_event_name") or "unknown"
-
-# The docs show the body in two shapes for this one event: flat `message`/`title`
-# ("Notification Hook Input Data") and nested under `notification_data`
-# (Notification reference, both read 2026-08-23 at
-# https://code.claude.com/docs/en/hooks). Read both - the kind alone does not say
-# WHICH permission or WHICH agent, and that is what the operator needs.
-nested = data.get("notification_data")
-nested = nested if isinstance(nested, dict) else {}
-message = (data.get("message") or data.get("title")
-           or nested.get("message") or nested.get("title") or "")
-
-line = {
-    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    "event": "notification",
-    "task": os.environ.get("SHEPHERD_TASK_ID"),
-    "kind": kind,
-    "message": message[:200],
-}
-with open(os.environ["SHEPHERD_STATUS_FILE"], "a", encoding="utf-8") as f:
-    f.write(json.dumps(line, ensure_ascii=False) + "\n")
-
-# Hand the kind to the shell, which decides whether it is worth a toast.
-with open(os.environ["SHEPHERD_KIND_FILE"], "w", encoding="utf-8") as f:
-    f.write(kind)
-PY
-
-# Every kind gets the status line above; only these three get the operator's
-# attention. `idle_prompt` is 165 of 194 recorded notifications and is routine
-# noise - a fable worker driving background subagents emits one at every turn
+# Every kind gets a status record; only these three get the operator's
+# attention. `idle_prompt` is the bulk of recorded notifications and is routine
+# noise - a worker driving background subagents emits one at every turn
 # boundary while a subagent runs, then self-resumes (adapter v0.8.2, R5 notes).
 # An allowlist, not a denylist: a kind nobody has classified is not an alarm.
 # `agent_completed` is recorded and deliberately NOT toasted: a finished worker
 # is the watcher's business (adapter R5), not an interruption for the operator.
-kind=$(cat "$kind_file" 2>/dev/null)
 case "$kind" in
   permission_prompt|elicitation_dialog|agent_needs_input) ;;
   *) exit 0 ;;

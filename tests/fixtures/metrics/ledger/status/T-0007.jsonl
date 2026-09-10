@@ -1,0 +1,2 @@
+this line is not json
+{"ts": "2026-08-01T12:00:00+0000", "event": "stop", "task": "T-0007", "session_id": "s7", "claim": "done", "tail": "SHEPHERD: done — ok"}
