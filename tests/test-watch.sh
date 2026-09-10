@@ -228,6 +228,42 @@ assert_ok "rearm kills the stale watcher" bash -c "! kill -0 $sl 2>/dev/null"
 assert_eq "rearm re-arms in its place" "$(sed -n 's/^session=//p' "$WATCHERS/T-0004.status")" "sess-me"
 kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; kill "$sl" 2>/dev/null; wait "$sl" 2>/dev/null
 
+# A live watcher of another INSTANCE. It reads `stale` here too - the session
+# differs - but killing it would unwatch that instance's task with nobody told,
+# and the thing that would have announced the failure is what was killed
+# (T-0268). rearm refuses the whole target; `arm` stays the deliberate way to
+# take one over. Same stand-in as above, so the case cannot pass on
+# kill_record's is_watch_process guard instead of on the fix.
+bash "$SHEPHERD_ROOT/fake/shepherd-watch" & peer=$!
+printf 'task=T-0004\nkind=status\npid=%s\nppid=%s\narmed_at=t\nwindow=30\nanchor=0\nsession=sess-peer\nowner=shepherd-peer\npane=none\nfile=x\n' "$peer" "$peer" >"$WATCHERS/T-0004.status"
+out=$(bash "$W" rearm T-0004 --window 30 2>"$OUT.err"); rc=$?
+assert_eq "rearm over another instance's live watcher exits 9" "$rc" "9"
+assert_eq "…and says ARMED-ELSEWHERE, naming the instance" "$out" "ARMED-ELSEWHERE T-0004 status=shepherd-peer"
+assert_ok "…and that watcher is untouched" bash -c "kill -0 $peer 2>/dev/null"
+assert_eq "…and so is its record" "$(sed -n 's/^session=//p' "$WATCHERS/T-0004.status")" "sess-peer"
+assert_eq "…and nothing of this session was armed in its place" "$(bash "$W" list T-0004 | grep -c 'session=sess-me')" "0"
+assert_ok "…and the reason names arm as the way to take the task over" grep -q 'shepherd-watch arm T-0004' "$OUT.err"
+# The other two situations stay tellable apart: `check` answers this reader's
+# own question - am I armed - and says no; `list` says whose the watcher is.
+assert_eq "check counts another instance's watcher as missing for this session" "$(bash "$W" check T-0004 | grep -c '^status$')" "1"
+assert_ok "list names the instance a stale record belongs to" bash -c "bash '$W' list T-0004 | grep -q '^T-0004 status stale .*owner=shepherd-peer$'"
+# Refused with SHEPHERD_ID unset too: shells on this machine lose it
+# mid-session, and an unknown identity is not evidence that the record is ours.
+out=$(env -u SHEPHERD_ID bash "$W" rearm T-0004 --window 30 2>/dev/null); rc=$?
+assert_eq "…and a reader with no SHEPHERD_ID refuses it as well" "$rc" "9"
+assert_ok "…leaving that watcher alive" bash -c "kill -0 $peer 2>/dev/null"
+kill "$peer" 2>/dev/null; wait "$peer" 2>/dev/null
+
+# A live record whose owner= is empty is not evidence either way, so it takes
+# the same recoverable direction: named and refused, never TERMed.
+bash "$SHEPHERD_ROOT/fake/shepherd-watch" & anon=$!
+printf 'task=T-0004\nkind=status\npid=%s\nppid=%s\narmed_at=t\nwindow=30\nanchor=0\nsession=sess-old\nowner=\npane=none\nfile=x\n' "$anon" "$anon" >"$WATCHERS/T-0004.status"
+out=$(bash "$W" rearm T-0004 --window 30 2>/dev/null); rc=$?
+assert_eq "a live record with no owner is refused, not killed" "$rc" "9"
+assert_eq "…and reports the owner as unknown" "$out" "ARMED-ELSEWHERE T-0004 status=unknown"
+assert_ok "…and it is still alive" bash -c "kill -0 $anon 2>/dev/null"
+kill "$anon" 2>/dev/null; wait "$anon" 2>/dev/null
+
 # A dead record (its process is gone) is simply missing.
 printf 'task=T-0004\nkind=status\npid=999999\nppid=999999\narmed_at=t\nwindow=30\nanchor=0\nsession=sess-me\nowner=shepherd-test\npane=none\nfile=x\n' >"$WATCHERS/T-0004.status"
 assert_ok "list marks a dead watcher dead" bash -c "bash '$W' list T-0004 | grep -q '^T-0004 status dead '"

@@ -93,7 +93,7 @@ Locks and cards must match both ways — for build cards only: a `kind: reply` c
 
 ### 8. Re-arm watchers
 
-`WATCH-OK T-NNNN` → nothing. `WATCH-MISSING T-NNNN <kinds> — shepherd-watch rearm T-NNNN` → `shepherd-watch rearm T-NNNN` as a background Bash task (adapter R5), for cards **you own** only; it arms what this session lacks (exit 4 `ARMED-ALREADY` when nothing), and `shepherd-watch list` shows the records.
+`WATCH-OK T-NNNN` → nothing. `WATCH-MISSING T-NNNN <kinds> — shepherd-watch rearm T-NNNN` → `shepherd-watch rearm T-NNNN` as a background Bash task (adapter R5), for cards **you own** only; it arms what this session lacks (exit 4 `ARMED-ALREADY` when nothing; exit 9 `ARMED-ELSEWHERE` when another instance's watcher is live — it kills nothing and arms nothing), and `shepherd-watch list` shows the records.
 
 **Plus one inbox watcher per instance.** The `INBOX` line is `shepherd-inbox owner`'s answer: `none` (exit 3) → arm nothing, say so in step 10; `yours` (exit 0) or `unreachable` (exit 1) → arm in the background, through `shepherd-watch` so `list` and `check` see it and a rolled-over session's watcher is replaced like any other:
 

@@ -3,7 +3,7 @@
 # docs/superpowers/specs/2026-09-02-worker-observation-design.md §3-§4).
 #
 #   shepherd-watch arm   T-NNNN [status|stall] [--window S]   # blocks until something fires; run it as a BACKGROUND Bash task
-#   shepherd-watch rearm T-NNNN [--window S]                  # arms only what this session is missing; exits 4 at once if nothing is
+#   shepherd-watch rearm T-NNNN [--window S]                  # arms only what this session is missing; 4 if nothing is, 9 if another instance is watching
 #   shepherd-watch check T-NNNN                               # prints the missing kinds, one per line; 0 = fully armed, 1 = not; arms nothing
 #   shepherd-watch list  [T-NNNN|inbox]                       # one line per record: task kind state pid=… window=… anchor=… armed=… session=… owner=…
 #   shepherd-watch arm   inbox [--window S]                   # the inbox watcher: shepherd-inbox watch as its one child, record inbox.<SHEPHERD_ID>, 21600 s unless given
@@ -20,6 +20,9 @@
 #   5   GONE              herdr reports no agent in the pane, confirmed by three pane probes over ~15 s
 #   124 TIMEOUT <window>s the window elapsed - the heartbeat backstop (30m S/M, 60m L/heavy)
 #   4   ARMED-ALREADY     rearm found nothing missing (a no-op wake)
+#   9   ARMED-ELSEWHERE   rearm found a live watcher of ANOTHER instance and refused
+#                         the whole target: nothing killed, nothing armed. Not a wake -
+#                         the task IS watched, just not for you (T-0268)
 #   2   ERROR <why>       bad task id, no card, a --window that is not whole seconds,
 #                         no verb, nothing armable
 #   7   (stderr only)     herdr is unusable, so the stall watcher stood down. When the
@@ -57,6 +60,19 @@
 # ledger/locks/). `arm` replaces any live watcher of the task; `rearm` fills
 # gaps, treating a record armed by another Claude session as stale - a
 # watcher from a rolled-over session can exit but wake nobody.
+#
+# The three states are READER-RELATIVE, and only `dead` is a fact about the
+# process: `live` means "armed by THIS session", `stale` means "alive, but
+# armed by another session". Neither is a diagnosis of a peer instance's
+# watchers - two instances read each other's healthy ones as dead within five
+# minutes on 2026-09-10, and both were wrong. `rearm` therefore splits `stale`
+# by the record's owner=: the same instance is a session that rolled over, and
+# replacing its watcher is the whole point of the verb; a different instance is
+# a watcher another shepherd is relying on, and killing it unwatches that
+# shepherd's task with nobody told - the failure no watcher announces, because
+# the thing that would announce it is what was killed. So rearm refuses the
+# whole target instead (ARMED-ELSEWHERE, 9; T-0268), and `arm` stays the way to
+# take a task over deliberately.
 #
 # Inputs come from the card, never from arguments shepherd could mistype:
 # pane: (stall target), size:/tier: (window ceiling). Session =
@@ -188,6 +204,19 @@ record_state() {  # <record-file> → live | stale | dead
   pid=$(record_get "$1" pid); sess=$(record_get "$1" session)
   pid_alive "$pid" || { echo dead; return; }
   if [ -n "$SESSION" ] && [ "$sess" != "$SESSION" ]; then echo stale; else echo live; fi
+}
+# peer_record — true when a record names a LIVE watcher of ANOTHER instance:
+# `stale` (its pid is alive, its session is not this one) AND an owner= that is
+# not this instance's. The owner field is the whole of the distinction rearm
+# needs; record_state's three verdicts stay as they are, because every other
+# reader wants exactly what they already say.
+# An owner that is empty on EITHER side counts as different. An unset
+# SHEPHERD_ID is not evidence that a record is ours - and shells on this
+# machine do lose it mid-session - so an unknown owner takes the recoverable
+# direction: a refusal that names the record beats a TERM nobody is told about,
+# and `arm` still replaces anything.
+peer_record() {  # <record-file>
+  [ "$(record_state "$1")" = stale ] && [ "$(record_get "$1" owner)" != "$OWNER" ]
 }
 # kill_record — stop the watcher a record describes, then remove the record.
 # BOTH pids are checked against is_watch_process first, and the check is not
@@ -484,9 +513,26 @@ cmd_arm() {
 }
 
 cmd_rearm() {
-  local args missing=() kind rec
+  local args missing=() elsewhere=() kind rec who
   parse_flags "$@"; args=("${PARSED[@]}")
   load_target "${args[0]:-}"
+  # First pass kills nothing. A target with even one live watcher of another
+  # instance is refused WHOLE: replacing the peer's record for one kind and
+  # arming this session's for the other would leave that instance half-watched
+  # and still not told, and arming a watcher on a task that is not yours is
+  # meddling in it either way. This runs ahead of the loop below for the same
+  # reason - by the time that loop reaches the second kind, the first is dead.
+  for kind in $(target_kinds); do
+    rec=$(record_path "$TASK" "$kind")
+    if [ -f "$rec" ] && peer_record "$rec"; then
+      who=$(record_get "$rec" owner); elsewhere+=("$kind=${who:-unknown}")
+    fi
+  done
+  if [ ${#elsewhere[@]} -gt 0 ]; then
+    printf 'ARMED-ELSEWHERE %s %s\n' "$TASK" "${elsewhere[*]}"
+    printf 'ARMED-ELSEWHERE: those watchers are alive and wake another instance, not this session - nothing killed, nothing armed. `shepherd-watch arm %s` takes the task over deliberately.\n' "$TASK" >&2
+    exit 9
+  fi
   for kind in $(target_kinds); do
     rec=$(record_path "$TASK" "$kind")
     if [ -f "$rec" ]; then
